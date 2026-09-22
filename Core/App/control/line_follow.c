@@ -284,8 +284,10 @@ void line_follow_init(void)
   boost_active = 0;
   gourd_latch  = 0;
   gourd_waves  = 0;
+#if GOURD_USE_FLIP
   gourd_flip   = 0;
   gourd_dir    = 1;
+#endif
 #if USE_D_FILTER
   lpf_init(&d_lpf, D_FILTER_ALPHA);
 #endif
