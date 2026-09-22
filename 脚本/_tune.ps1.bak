@@ -1,0 +1,198 @@
+# =============================================================
+#  test17 循迹小车 · 调参助手 tune.ps1
+#  配合固件的串口在线调参使用（COM8 115200）
+#  兼容 5 路（旧车）与 8 路（新车）固件输出：IR:<01串> RPM1= RPM2= KP= KD= SP=
+#
+#  用法:
+#    .\tune.ps1 -Action Read              # 实时监视（默认10秒，可 -Seconds 30）
+#    .\tune.ps1 -Action Send -Cmd "P 12"  # 发一条命令并看回显
+#    .\tune.ps1 -Action Log -Seconds 30   # 记录30秒数据到CSV（logs\）
+#    .\tune.ps1 -Action Tune -Seconds 15  # 车跑着时采集，分析摆头/丢线，给KP建议
+#    .\tune.ps1 -Action Sym               # 双电机同速对比RPM，查机械/接线不对称
+#    .\tune.ps1 -Port COM8 -Baud 115200   # 换端口/波特率（默认 COM8 115200）
+# =============================================================
+
+param(
+  [string]$Port = "COM8",
+  [int]$Baud = 115200,
+  [ValidateSet("Read","Send","Log","Tune","Sym")]
+  [string]$Action = "Read",
+  [string]$Cmd = "",
+  [int]$Seconds = 10
+)
+
+try { Add-Type -AssemblyName System.IO.Ports -ErrorAction SilentlyContinue } catch {}
+
+# ---------- 基础工具 ----------
+function Open-Port {
+  $sp = New-Object System.IO.Ports.SerialPort($Port, $Baud, [System.IO.Ports.Parity]::None, 8, [System.IO.Ports.StopBits]::One)
+  $sp.ReadTimeout = 500
+  try { $sp.Open() } catch {
+    Write-Host "[错误] 打不开 $Port —— 是不是串口助手还开着？关掉再试。" -ForegroundColor Red
+    exit 1
+  }
+  return $sp
+}
+
+function Read-Chars($sp, [int]$ms) {
+  $buf = ''
+  $deadline = (Get-Date).AddMilliseconds($ms)
+  while ((Get-Date) -lt $deadline) {
+    try { $buf += $sp.ReadExisting() } catch {}
+    Start-Sleep -Milliseconds 20
+  }
+  return $buf
+}
+
+function Get-IRLines($text) { return @($text -split "`r?`n" | Where-Object { $_ -match '^IR:' }) }
+
+# 从一行 "IR:<01串> RPM1=.. RPM2=.. KP=x.y KD=x.y SP=.." 解析出结构化数据
+# 权重规则与 app_config.h 的 LINE_CHANNEL_TABLE 一致：左负右正，偶数路（8路）无中间 0
+#   5 路 → -2 -1 0 +1 +2      8 路 → -4 -3 -2 -1 +1 +2 +3 +4
+function Parse-IR($line) {
+  if ($line -notmatch '^IR:([01]+)\s+RPM1=(-?\d+)\s+RPM2=(-?\d+)\s+KP=(-?\d+)\.(\d+)\s+KD=(-?\d+)\.(\d+)\s+SP=(-?\d+)') { return $null }
+  $bits = $Matches[1]
+  $n    = $bits.Length
+  $half = [int]($n / 2)
+  $e    = 0
+  for ($i = 0; $i -lt $n; $i++) {
+    if ($bits[$i] -eq '1') {
+      if ($n % 2 -eq 1)      { $e += ($i - $half) }        # 奇数路：中间为 0
+      elseif ($i -lt $half)  { $e += ($i - $half) }        # 偶路左半：-n/2 .. -1
+      else                   { $e += ($i - $half + 1) }    # 偶路右半：+1 .. +n/2
+    }
+  }
+  return [pscustomobject]@{
+    IR    = $bits
+    Error = $e
+    RPM1  = [int]$Matches[2]
+    RPM2  = [int]$Matches[3]
+    KP    = [double]("$($Matches[4]).$($Matches[5])")
+    KD    = [double]("$($Matches[6]).$($Matches[7])")
+    SP    = [int]$Matches[8]
+  }
+}
+
+function Send-Cmd($sp, $cmd, [int]$waitMs) {
+  $sp.Write($cmd + "`r`n")
+  Start-Sleep -Milliseconds $waitMs
+  $resp = Read-Chars $sp 300
+  return @($resp -split "`r?`n" | Where-Object { $_ -match '^OK ' })
+}
+
+function Collect-Lines($sp, [int]$sec) {
+  $all = ''
+  $deadline = (Get-Date).AddSeconds($sec)
+  while ((Get-Date) -lt $deadline) {
+    $all += Read-Chars $sp 300
+    Start-Sleep -Milliseconds 50
+  }
+  return Get-IRLines $all
+}
+
+# ---------- 动作 ----------
+switch ($Action) {
+
+  "Read" {
+    $sp = Open-Port
+    Write-Host "== 实时监视 $Port ($Seconds 秒)，Ctrl+C 可提前结束 ==" -ForegroundColor Cyan
+    $t0 = Get-Date
+    while ((Get-Date) -lt $t0.AddSeconds($Seconds)) {
+      $lines = Get-IRLines (Read-Chars $sp 500)
+      foreach ($ln in $lines) {
+        $d = Parse-IR $ln
+        if ($d) {
+          $t = ((Get-Date) - $t0).TotalSeconds
+          Write-Host ("[{0,5:N1}s] IR:{1} E:{2,3} RPM1={3,3} RPM2={4,3} KP={5,4} KD={6,4} SP={7}" -f $t, $d.IR, $d.Error, $d.RPM1, $d.RPM2, $d.KP, $d.KD, $d.SP)
+        } else { Write-Host $ln }
+      }
+      Start-Sleep -Milliseconds 50
+    }
+    $sp.Close()
+    Write-Host "== 结束 ==" -ForegroundColor Cyan
+  }
+
+  "Send" {
+    if (-not $Cmd) { Write-Host "用法: .\tune.ps1 -Action Send -Cmd ""P 12""" -ForegroundColor Yellow; exit }
+    $sp = Open-Port
+    $oks = Send-Cmd $sp $Cmd 500
+    if ($oks.Count -gt 0) { $oks | ForEach-Object { Write-Host $_ -ForegroundColor Green } }
+    else { Write-Host "[无回显] 检查命令格式或串口接线" -ForegroundColor Red }
+    # 顺带显示最新一条 IR
+    $lines = Get-IRLines (Read-Chars $sp 700)
+    if ($lines.Count -gt 0) { Write-Host ("最新: " + $lines[-1]) -ForegroundColor DarkGray }
+    $sp.Close()
+  }
+
+  "Log" {
+    $sp = Open-Port
+    Write-Host "== 记录 $Seconds 秒数据... ==" -ForegroundColor Cyan
+    $rows = @()
+    foreach ($ln in (Collect-Lines $sp $Seconds)) {
+      $d = Parse-IR $ln
+      if ($d) { $rows += [pscustomobject]@{ t_ms=[int]((Get-Date).Ticks/10000 % 1000000); IR=$d.IR; Error=$d.Error; RPM1=$d.RPM1; RPM2=$d.RPM2; KP=$d.KP; KD=$d.KD; SP=$d.SP } }
+    }
+    $sp.Close()
+    if ($rows.Count -eq 0) { Write-Host "[没收到数据] 车在跑吗？串口对吗？" -ForegroundColor Red; exit }
+    $dir = Join-Path $PSScriptRoot "logs"
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $file = Join-Path $dir ("tune_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".csv")
+    $rows | Export-Csv -Path $file -NoTypeInformation -Encoding UTF8
+    Write-Host "已保存 $($rows.Count) 条 -> $file" -ForegroundColor Green
+  }
+
+  "Tune" {
+    $sp = Open-Port
+    Write-Host "== 开始采集 $Seconds 秒（车要在跑！） ==" -ForegroundColor Cyan
+    $seq = @()
+    foreach ($ln in (Collect-Lines $sp $Seconds)) {
+      $d = Parse-IR $ln
+      if ($d) { $seq += $d }
+    }
+    $sp.Close()
+    if ($seq.Count -lt 3) { Write-Host "[数据太少] 车在跑吗？串口对吗？" -ForegroundColor Red; exit }
+
+    # 分析: 加权误差序列
+    $errs = @($seq | ForEach-Object { $_.Error })
+    $lost  = @($seq | Where-Object { $_.IR -match '^0+$' }).Count
+    $onAll = @($seq | Where-Object { $_.IR -match '^1+$' }).Count
+    $signChanges = 0
+    for ($i = 1; $i -lt $errs.Count; $i++) {
+      if ($errs[$i-1] -ne 0 -and $errs[$i] -ne 0 -and (($errs[$i-1] -gt 0) -ne ($errs[$i] -gt 0))) { $signChanges++ }
+    }
+    $avgAbs = ($errs | Where-Object { $_ -ne 0 } | ForEach-Object { [math]::Abs($_) } | Measure-Object -Average).Average
+    if ($null -eq $avgAbs) { $avgAbs = 0 }
+    $rate = $signChanges / $Seconds
+
+    Write-Host "== 分析结果（$($seq.Count) 条采样 / $Seconds 秒） ==" -ForegroundColor Cyan
+    Write-Host ("  加权误差符号翻转: {0} 次  ({1:N1} 次/秒)" -f $signChanges, $rate)
+    Write-Host ("  平均|误差|:        {0:N2}  (0=完全居中, 越大越偏)" -f $avgAbs)
+    Write-Host ("  丢线(全0):     {0} 次" -f $lost)
+    Write-Host ("  全压线(全1):   {0} 次 (多为传感器过近/过灵敏)" -f $onAll)
+
+    Write-Host "== 建议 ==" -ForegroundColor Green
+    if ($rate -gt 1.5) { Write-Host "  ⚠ 误差符号频繁翻转 -> 车在摆头(S形) -> 降 KP（发 P <当前-2>）" -ForegroundColor Yellow }
+    elseif ($lost -gt $seq.Count / 10) { Write-Host "  ⚠ 丢线频繁 -> 降 S 减速 或 升 KP（发 P <当前+2>）" -ForegroundColor Yellow }
+    elseif ($avgAbs -gt 1.2) { Write-Host "  ⚠ 平均偏差大 -> 跟不上线 -> 升 KP（发 P <当前+2>）" -ForegroundColor Yellow }
+    else { Write-Host "  ✓ 姿态稳定，可以尝试加 S 提速（发 S <当前+10>）" -ForegroundColor Green }
+  }
+
+  "Sym" {
+    $sp = Open-Port
+    Write-Host "== 双电机同速对称性测试（轮子离地！） ==" -ForegroundColor Cyan
+    Send-Cmd $sp "S 0" 300 | Out-Null
+    Send-Cmd $sp "T 1 40" 500 | Out-Null
+    $r1 = @(Collect-Lines $sp 3 | ForEach-Object { (Parse-IR $_).RPM1 } | Measure-Object -Maximum).Maximum
+    Send-Cmd $sp "T 2 40" 500 | Out-Null
+    $r2 = @(Collect-Lines $sp 3 | ForEach-Object { (Parse-IR $_).RPM2 } | Measure-Object -Maximum).Maximum
+    Send-Cmd $sp "T 0 0" 300 | Out-Null
+    $sp.Close()
+    if (-not $r1 -or -not $r2) { Write-Host "[RPM=0] 霍尔没测到：供电/磁铁距离/PULSES_PER_REV 检查" -ForegroundColor Red; exit }
+    $diff = [math]::Abs($r1 - $r2) / [math]::Max($r1, $r2) * 100
+    Write-Host ("  电机1(左) 最高RPM: {0}" -f $r1) -ForegroundColor White
+    Write-Host ("  电机2(右) 最高RPM: {0}" -f $r2) -ForegroundColor White
+    Write-Host ("  转速差: {0:N1}%" -f $diff) -ForegroundColor Cyan
+    if ($diff -gt 15) { Write-Host "  ⚠ 差距大：查两个电机机械阻力/霍尔磁铁数是否一致" -ForegroundColor Yellow }
+    else { Write-Host "  ✓ 对称性OK（走直线漂移另有原因再查）" -ForegroundColor Green }
+  }
+}

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>test17 新车 接线对照表（v2 新版：8路红外+编码器+MPU6050+LED/蜂鸣器/按键）</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Microsoft YaHei","PingFang SC",sans-serif; background:#f0f0f0; padding:20px; display:flex; justify-content:center; }
+  .container { background:#fff; padding:30px; border-radius:8px; box-shadow:0 2px 12px rgba(0,0,0,.15); max-width:1150px; }
+  h1 { text-align:center; font-size:22px; margin-bottom:6px; color:#1a1a2e; }
+  .subtitle { text-align:center; font-size:13px; color:#666; margin-bottom:8px; }
+  .ver { text-align:center; font-size:12px; color:#c0392b; margin-bottom:18px; font-weight:bold; }
+  .legend { display:flex; justify-content:center; gap:18px; margin-bottom:16px; font-size:12px; flex-wrap:wrap; }
+  .legend span { padding:2px 10px; border-radius:3px; color:#fff; font-weight:bold; }
+  .lg-motor{background:#e74c3c;} .lg-sensor{background:#27ae60;} .lg-comm{background:#9b59b6;} .lg-power{background:#3498db;} .lg-other{background:#95a5a6;} .lg-warn{background:#e67e22;} .lg-hmi{background:#16a085;}
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { background:#2c3e50; color:#fff; padding:8px 6px; text-align:center; font-weight:normal; }
+  td { padding:5px 6px; text-align:center; border:1px solid #ddd; }
+  tr:nth-child(even){ background:#fafafa; }
+  .sec { background:#2980b9 !important; color:#fff; font-weight:bold; }
+  .c-motor{background:#fadbd8;color:#c0392b;font-weight:bold;}
+  .c-sensor{background:#d5f5e3;color:#1e8449;font-weight:bold;}
+  .c-comm{background:#e8daef;color:#8e44ad;font-weight:bold;}
+  .c-power{background:#d6eaf8;color:#2980b9;font-weight:bold;}
+  .c-other{background:#ebedf0;color:#555;font-weight:bold;}
+  .c-warn{background:#fdebd0;color:#b9770e;font-weight:bold;}
+  .c-hmi{background:#d1f2eb;color:#0e6655;font-weight:bold;}
+  .note{max-width:1150px;margin-top:18px;font-size:13px;line-height:1.8;color:#333;}
+  .note b{color:#c0392b;}
+  .tree{background:#f8f9fa;border:1px solid #ddd;border-radius:6px;padding:14px 18px;margin:14px 0;font-family:Consolas,monospace;font-size:12.5px;line-height:1.7;white-space:pre;overflow-x:auto;}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>test17 新车 接线对照表（v2）</h1>
+  <div class="subtitle">STM32F103<b>新</b>C8T6 · 8路红外 · <b>JGA25-370</b>(TB6612) · 编码器测速(2路) · MPU6050 · LED×3+蜂鸣器+启动键 · 白线黑底</div>
+  <div class="ver">★ 本表已同步「新车设计」：PB8/PB9 可用（旧芯片才坏）· 新增 LED×3 / 蜂鸣器 / 启动按键 · 电机改为 JGA25-370 620rpm</div>
+
+  <div class="legend">
+    <span class="lg-motor">电机</span><span class="lg-sensor">传感器</span>
+    <span class="lg-hmi">人机(LED/蜂鸣/按键)</span>
+    <span class="lg-comm">通讯</span><span class="lg-power">电源</span>
+    <span class="lg-other">其他</span><span class="lg-warn">注意</span>
+  </div>
+
+  <table>
+    <tr><th colspan="4">一、电机（TB6612 / JGA25-370 620rpm ×2）</th></tr>
+    <tr><td class="sec">功能</td><td class="sec">C8T6 引脚</td><td class="sec">接哪</td><td class="sec">备注</td></tr>
+    <tr><td class="c-motor">左电机 PWM</td><td class="c-motor">PA2</td><td class="c-motor">TB6612 PWMA</td><td>TIM2_CH3 · 10kHz</td></tr>
+    <tr><td class="c-motor">右电机 PWM</td><td class="c-motor">PA3</td><td class="c-motor">TB6612 PWMB</td><td>TIM2_CH4 · 10kHz</td></tr>
+    <tr><td class="c-motor">左电机 方向A/B</td><td class="c-motor">PA4 / PA5</td><td class="c-motor">TB6612 AIN1/AIN2</td><td>实测：电机1=A通道=<b>左轮</b></td></tr>
+    <tr><td class="c-motor">右电机 方向A/B</td><td class="c-motor">PB3 / PB4</td><td class="c-motor">TB6612 BIN1/BIN2</td><td>JTAG 已关 · 电机2=B通道=<b>右轮</b></td></tr>
+    <tr><td class="c-motor">TB6612 STBY</td><td class="c-motor">不接 GPIO<br>（急停可选 PA11）</td><td class="c-motor">STBY 经 <b>10kΩ 上拉到 3.3V</b>（常高=工作）</td><td>★要硬急停：GPIO(如 PA11) 接同一点，低=停（<b>必须配 10k 上拉</b>）</td></tr>
+    <tr><td class="c-warn" colspan="4">⚠️ <b>TB6612 电源别搞混</b>：<b>VM</b>=电池 7.4V（电机功率）；<b>VCC</b>=底板 5V 轨（逻辑电源，<b>不要挂 STM32 的 3.3V</b>）；<b>STBY 是信号脚</b>（几乎不耗电），上拉到 3.3V 即可。<b>直连 3.3V + 再接 GPIO = 短路，禁止</b>。</td></tr>
+    <tr><td class="c-warn" colspan="4">⚠️ 转向映射已实测确认：<b>电机1(PA2/PWMA)=左轮、电机2(PA3/PWMB)=右轮</b>；若换 B 通道接线需在 <code>motor.c</code> 对调 DIR3/DIR4。</td></tr>
+
+    <tr><th colspan="4">二、编码器测速（正交，TIM 编码器模式）</th></tr>
+    <tr><td class="sec">编码器</td><td class="sec">C8T6 引脚</td><td class="sec">接</td><td class="sec">定时器模式</td></tr>
+    <tr><td class="c-sensor">左编码器</td><td>PA6(A相) / PA7(B相)</td><td>左电机编码器 A/B</td><td>TIM3 Encoder</td></tr>
+    <tr><td class="c-sensor">右编码器</td><td>PB6(A相) / PB7(B相)</td><td>右电机编码器 A/B</td><td>TIM4 Encoder</td></tr>
+    <tr><td class="c-warn" colspan="4">⚠️ <b>ENCODER_PPR</b>：JGA25-370 620rpm/9.6:1 编码器 11线 → 输出轴每圈 <b>11×9.6 ≈ 106</b>（✅ 2026-09-11 <code>app_config.h</code> 已填 106；装好仍要<b>手转一圈核对</b>）。</td></tr>
+
+    <tr><th colspan="4">二·补、电机 6 线 → 驱动/单片机 桥接（★重点，别接错）</th></tr>
+    <tr><td class="sec">电机线(颜色)</td><td class="sec">左电机(左轮)</td><td class="sec">右电机(右轮)</td><td class="sec">说明</td></tr>
+    <tr><td class="c-motor">🔴红 电机+</td><td>TB6612 AO1</td><td>TB6612 BO1</td><td>经驱动模块</td></tr>
+    <tr><td class="c-motor">⚪白 电机−</td><td>TB6612 AO2</td><td>TB6612 BO2</td><td>经驱动模块</td></tr>
+    <tr><td class="c-sensor">🔵蓝 编码器3.3V</td><td>单片机 3.3V</td><td>单片机 3.3V</td><td>直接接 · ★<b>接 3.3V 别接 5V</b>（保证 A/B 相输出就是 3.3V 电平）</td></tr>
+    <tr><td class="c-sensor">⚫黑 编码器GND</td><td>单片机 GND</td><td>单片机 GND</td><td>直接接</td></tr>
+    <tr><td class="c-sensor">🟡黄 编码器A相</td><td>PA6 (TIM3_CH1)</td><td>PB6 (TIM4_CH1)</td><td>直接接信号</td></tr>
+    <tr><td class="c-sensor">🟢绿 编码器B相</td><td>PA7 (TIM3_CH2)</td><td>PB7 (TIM4_CH2)</td><td>直接接信号</td></tr>
+    <tr><td class="c-warn" colspan="4">⚠️ 电机红/白线【必须经 TB6612】，不能直接接单片机；编码器蓝/黑/黄/绿【直接接单片机】。<b>两轮编码器线序必须一致</b>，否则左右计数符号相反、速度环发疯。</td></tr>
+
+    <tr><th colspan="4">三、8路红外循迹（左 → 右，数字量 GPIO）</th></tr>
+    <tr><td class="sec">路数</td><td class="sec">C8T6 引脚</td><td class="sec">位置</td><td class="sec">加权权重</td></tr>
+    <tr><td class="c-sensor">第1路(最左)</td><td>PA0</td><td>左外</td><td>-4</td></tr>
+    <tr><td class="c-sensor">第2路</td><td>PA1</td><td>左</td><td>-3</td></tr>
+    <tr><td class="c-sensor">第3路</td><td>PA8</td><td>中左</td><td>-2</td></tr>
+    <tr><td class="c-sensor">第4路</td><td>PA15</td><td>中左偏</td><td>-1</td></tr>
+    <tr><td class="c-sensor">第5路</td><td>PB0</td><td>中右偏</td><td>+1</td></tr>
+    <tr><td class="c-sensor">第6路</td><td>PB1</td><td>中右</td><td>+2</td></tr>
+    <tr><td class="c-sensor">第7路</td><td>PB12</td><td>右</td><td>+3</td></tr>
+    <tr><td class="c-sensor">第8路(最右)</td><td>PB13</td><td>右外</td><td>+4</td></tr>
+    <tr><td class="c-warn" colspan="4">⚠️ 模块 <b>5V</b> 供电（部分模块支持 3.3V，按实物）；<b>白线黑底</b> → <code>LINE_ACTIVE_LEVEL = GPIO_PIN_RESET</code>（白线输出<b>低</b>才算检测到）。<br>8 脚须在 CubeMX 配成 <b>GPIO 输入</b>；PA15 默认是 JTDI，<b>必须关 JTAG（保留 SWD）</b>才能当普通 IO。</td></tr>
+
+    <tr><th colspan="4">四、MPU6050（I2C1）</th></tr>
+    <tr><td class="sec">C8T6 引脚</td><td class="sec">MPU6050</td><td class="sec">说明</td></tr>
+    <tr><td>PB10</td><td>SCL</td><td>I2C1_SCL（避开编码器用的 PB6/PB7）</td></tr>
+    <tr><td>PB11</td><td>SDA</td><td>I2C1_SDA</td></tr>
+    <tr><td>3.3V</td><td>VCC</td><td>供电</td></tr>
+    <tr><td>GND</td><td>GND / AD0</td><td>AD0 接地 → 地址 0x68</td></tr>
+
+    <tr><th colspan="4">五、★人机：LED×3 + 蜂鸣器 + 启动按键（撤 OLED 后的新方案）</th></tr>
+    <tr><td class="sec">名称</td><td class="sec">C8T6 引脚</td><td class="sec">接法</td><td class="sec">用途</td></tr>
+    <tr><td class="c-hmi">LED1</td><td>PC13</td><td>串限流电阻 → LED → GND</td><td>读秒 1 / 状态</td></tr>
+    <tr><td class="c-hmi">LED2</td><td>PB14</td><td>同上</td><td>读秒 2 / 运行</td></tr>
+    <tr><td class="c-hmi">LED3</td><td>PB15</td><td>同上</td><td>读秒 3 / 错误</td></tr>
+    <tr><td class="c-hmi">蜂鸣器</td><td><b>PA11</b><br>（原 PB8）</td><td><b>无源</b>蜂鸣器 + 三极管/MOS 驱动，<b>TIM1_CH4 PWM</b> 发声</td><td>状态音（十字/丢线/终点）</td></tr>
+    <tr><td class="c-hmi">启动按键</td><td>PB9</td><td>按键一端 → PB9，另一端 → GND；<b>内部上拉</b>，按下=低</td><td>IDLE → 3s读秒 → TRACK</td></tr>
+    <tr><td class="c-warn" colspan="4">⚠️ <b>无源</b>蜂鸣器才需要 PWM（有源的给电就响、发不出音调）。必须加三极管/MOS，<b>GPIO 不能直接驱动</b>（电流不够会烧脚）；蜂鸣器两端并 <b>1N4148 续流二极管</b>（感性负载）。<br>⚠️ 按键要<b>硬件消抖</b>（并联 0.1µF）或软件消抖，否则上电误触发。<br>⚠️ <b>2026-09-11 引脚修正</b>：蜂鸣器原定 <b>PB8 = TIM4_CH3</b>，但 TIM4 已给右编码器（PB6/PB7 正交解码）——<b>同一个定时器不能既做编码器又输出 PWM</b>，故改 <b>PA11 = TIM1_CH4</b>；PB8 转为备用。改用<b>有源</b>蜂鸣器则不需 PWM，PB8 当普通 GPIO 即可。</td></tr>
+
+    <tr><th colspan="4">六、串口 / 蓝牙 / 下载 / 晶振</th></tr>
+    <tr><td class="sec">名称</td><td class="sec">引脚</td><td class="sec">说明</td></tr>
+    <tr><td class="c-comm">USART1（串口/蓝牙共用）</td><td>PA9 TX / PA10 RX</td><td>115200 · 有线 USB-TTL 或 HC-05 <b>二选一插</b></td></tr>
+    <tr><td class="c-power">SWD 下载</td><td>PA13 (SWDIO) / PA14 (SWCLK)</td><td>ST-Link · 4pin: 3.3V/GND/SWDIO/SWCLK</td></tr>
+    <tr><td class="c-power">外部晶振(HSE)</td><td>PD0 / PD1</td><td>✅ <b>核心板自带</b>（8MHz+22pF 已在板上），底板不用买、不用接</td></tr>
+    <tr><td class="c-other">BOOT0</td><td>BOOT0</td><td><b>核心板自带跳线</b>（帽选 0 = 从 Flash 启动），底板不用接</td></tr>
+    <tr><td class="c-other">备用</td><td>PB2 / PB5 / PA11 / PA12</td><td>留空备用（霍尔已由编码器替代）</td></tr>
+
+    <tr><th colspan="4">七、电源树</th></tr>
+    <tr><td class="sec">轨</td><td class="sec">来源</td><td class="sec">去向</td><td class="sec">要求</td></tr>
+    <tr><td class="c-power">7.4V</td><td>电池 2S LiPo 2200mAh</td><td>TB6612 <b>VM</b>（电机功率）</td><td>VM 大电容 100~470µF</td></tr>
+    <tr><td class="c-power">5V</td><td><b>外置小降压模块</b>(v1: MINI360/MP1584 模块；v2 换板上 MP1584EN/TPS5430)</td><td>8路红外 / 蓝牙 / 蜂鸣器 / TB6612 VCC</td><td><b>≥2A</b></td></tr>
+    <tr><td class="c-power">3.3V</td><td><b>核心板 5V 脚供电</b>（板载 LDO 出 3.3V 供 MCU）＋ 板上 AMS1117-3.3</td><td>AMS1117 的 3.3V：MPU6050 / 编码器 / LED 逻辑</td><td><b>≥1A</b></td></tr>
+    <tr><td class="c-warn" colspan="4">⚠️ <b>必须共地</b>；电机电源与逻辑电源<b>分开走线</b>；5V/3.3V 各加 10µF + 0.1µF；加<b>电源开关</b> + 可选防反接。</td></tr>
+  </table>
+
+  <div class="tree">电池 7.4V → XT30 → 电源开关(≥5A)
+  ├─→ TB6612 VM ──→ 左/右电机（功率）
+  └─→ 外置降压模块 5V ─┬─→ 8路红外模块
+                ├─→ 蓝牙 / USB-TTL
+                ├─→ 蜂鸣器（经三极管）
+                └─→ AMS1117-3.3(板上) ─┬─→ STM32 / MPU6050
+                              ├─→ 编码器 VCC
+                              └─→ LED / 逻辑</div>
+
+  <div class="note">
+    <b>提醒</b>：① 本表已同步新车设计（<b>新 C8T6</b> + JGA25-370 + LED/蜂鸣器/按键）。<br>
+    ② <b>“PB8/PB9 已损坏”是旧芯片(test16)的事，本表已删除该限制</b>——新车用新芯片，PB8=蜂鸣器、PB9=启动键。<br>
+    ③ 8 个传感器脚配 <b>GPIO 输入</b>；PA15 需<b>关 JTAG 保留 SWD</b>；编码器脚配 <b>TIM3/TIM4 Encoder 模式</b>；MPU6050 配 <b>I2C1(PB10/11)</b>；蜂鸣器配 <b>PWM</b>。<br>
+    ④ CubeMX 重新生成会冲掉 <code>usart.c</code> 里 PA10(RX) 的手改（曾被配成 AF_PP 顶住输入）→ <b>重新生成后要把 PA10 改回 GPIO_MODE_INPUT + NOPULL</b>。<br>
+    ⑤ 启用编码器前：置 <code>USE_ENCODER=1</code> 即可（<code>ENCODER_PPR</code> ✅ 2026-09-11 已填 106，装好手转一圈核对）。<br>
+    ⑥ <b>主控 = 成品 C8T6 核心板插底板</b>（排母×2）：晶振/BOOT0/复位核心板自带，底板不用接；核心板走 <b>5V 脚</b>供电（板载 LDO 出 3.3V），底板 AMS1117 的 3.3V 只给 MPU6050/编码器/LED，<b>两路 3.3V 不并联</b>。<br>
+    ⑦ <b>全车共地</b>；实际接线若与此不同，以实际为准并同步改本表 + 代码。
+  </div>
+</div>
+</body>
+</html>
