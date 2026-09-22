@@ -29,6 +29,8 @@ static uint16_t cross_events = 0;  /* 一趟里"判定为十字"的次数（遥�
 static uint16_t branch_events = 0; /* 一趟里"宽图案只贴一端 → 拒绝当十字"的次数（遥测 BR=） */
 static uint8_t  one_end_prev = 0;  /* 上一拍是否"只贴一端的宽图案"（边沿，防刷屏） */
 static uint8_t  det_prev     = 0;  /* 上一拍是否"落在十字时间窗"（边沿，给预算计数用） */
+static uint8_t  wide_gap     = 0;  /* 宽图案已连续消失多少拍（★事件计数防抖，见 app_config） */
+static uint8_t  wide_armed   = 1;  /* 本段宽图案"可否计数"：★在段首那一拍判定并锁存整段 */
 
 /* ★直线提速（2026-09-22） */
 static uint16_t straight_cycles = 0;   /* 连续"直线"拍数 */
@@ -196,20 +198,34 @@ void line_follow_control(int16_t base)
       }
     }
 #endif
+    /* ★2026-09-22 16:07 事件计数防抖（实跑：第 4 次真十字被判成假十字 → 车转弯）
+       问题的形状：一次过十字若图案中间抖掉一帧，wide_cnt 归零 → 又冒出一个"上升沿"
+       → 同一次过十字被数成 2 次 → 预算提前用完，把第 4 次真十字也拦了。
+       ⚠️ 判定时机很讲究：必须在"宽图案段的**第一拍**"判 gap 并**锁存整段**。
+         因为真正的上升沿出现在宽图案的第 2 拍（wide_cnt 到 CROSS_CONFIRM_CNT 才成事件），
+         而第 1 拍已把 wide_gap 清零 —— 若等上升沿那拍才去看 gap，读到的永远是 0，
+         会把**所有**事件一起按掉。（我第一次就写错了，靠模拟跑出来才发现。） */
     if (wide)
     {
+      if (wide_cnt == 0u)                                    /* 段首：判定 + 锁存整段 */
+        wide_armed = (wide_gap >= CROSS_REARM_FRAMES) ? 1u : 0u;
       if (wide_cnt < 200u) wide_cnt++;
+      wide_gap = 0;
     }
     else
     {
       wide_cnt = 0;
+      if (wide_gap < 250u) wide_gap++;
     }
 
     uint8_t detected = ((wide_cnt >= CROSS_CONFIRM_CNT) && (wide_cnt <= CROSS_MAX_FRAMES)) ? 1u : 0u;
     wide_long = (wide_cnt > CROSS_MAX_FRAMES) ? 1u : 0u;
 
-    /* 每个"宽图案落在十字时间窗"的事件记一次（上升沿），供预算层比较 */
-    uint8_t det_rising = (detected && !det_prev) ? 1u : 0u;
+    /* 每个"宽图案落在十字时间窗"的事件记一次（上升沿），供预算层比较。
+       raw_rising 必须在 `det_prev = detected;` **之前**取 —— 否则编译器会发现
+       `detected && !det_prev` 恒假，把下面"dup"那条打印优化掉（已验证过）。 */
+    uint8_t raw_rising = (detected && !det_prev) ? 1u : 0u;    /* 上升沿（还没过防抖） */
+    uint8_t det_rising = (raw_rising && wide_armed) ? 1u : 0u; /* 过了防抖才算真事件 */
     if (det_rising && (cross_events < 60000u)) cross_events++;
     det_prev = detected;
 
@@ -221,32 +237,41 @@ void line_follow_control(int16_t base)
 #endif
 
 #if CROSS_PRINT
-    char msg_cross[96];
-    if (det_rising)                              /* 一次事件打一行（上升沿，不刷屏） */
+    char msg_cross[112];
+    if (det_rising)                              /* 真事件打一行（上升沿，不刷屏） */
     {
       char irs[LINE_CHANNELS + 1];
       for (uint8_t i = 0; i < LINE_CHANNELS; i++) irs[i] = (r.raw >> i) & 1u ? '1' : '0';
       irs[LINE_CHANNELS] = '\0';
       if (cross_now)
       {
-        snprintf(msg_cross, sizeof(msg_cross), "CROSS #%d IR=%s wide=%d (straight)",
-                 (int)cross_events, irs, (int)wide_cnt);
+        snprintf(msg_cross, sizeof(msg_cross), "CROSS #%d IR=%s e=%+d wide=%d (straight)",
+                 (int)cross_events, irs, (int)r.error, (int)wide_cnt);
       }
       else
       {
-        snprintf(msg_cross, sizeof(msg_cross), "CROSS #%d IR=%s BLOCKED(budget %d) -> turn",
-                 (int)cross_events, irs, (int)CROSS_BUDGET_MAX);
+        snprintf(msg_cross, sizeof(msg_cross), "CROSS #%d IR=%s e=%+d BLOCKED(budget %d) -> turn",
+                 (int)cross_events, irs, (int)r.error, (int)CROSS_BUDGET_MAX);
       }
       telemetry_msg(msg_cross);
     }
-    if (one_end && !one_end_prev)                /* 宽图案只贴一端 → 拒绝了十字 → 也打一行 */
+    else if (raw_rising)                         /* ★被防抖按下的重复事件 → 也打一行 */
+    {
+      char irs[LINE_CHANNELS + 1];
+      for (uint8_t i = 0; i < LINE_CHANNELS; i++) irs[i] = (r.raw >> i) & 1u ? '1' : '0';
+      irs[LINE_CHANNELS] = '\0';
+      snprintf(msg_cross, sizeof(msg_cross), "CROSS dup IR=%s gap=%d (<%d) -> ignored",
+               irs, (int)wide_gap, (int)CROSS_REARM_FRAMES);
+      telemetry_msg(msg_cross);
+    }
+    if (one_end && !one_end_prev)                /* 宽图案只贴一端 → 形状层拦下了 → 打一行 */
     {
       char irs[LINE_CHANNELS + 1];
       for (uint8_t i = 0; i < LINE_CHANNELS; i++) irs[i] = (r.raw >> i) & 1u ? '1' : '0';
       irs[LINE_CHANNELS] = '\0';
       if (branch_events < 60000u) branch_events++;
-      snprintf(msg_cross, sizeof(msg_cross), "BRANCH #%d IR=%s -> NOT cross (turn)",
-               (int)branch_events, irs);
+      snprintf(msg_cross, sizeof(msg_cross), "BRANCH #%d IR=%s e=%+d -> NOT cross (turn)",
+               (int)branch_events, irs, (int)r.error);
       telemetry_msg(msg_cross);
     }
 #endif
@@ -478,6 +503,8 @@ void line_follow_init(void)
   branch_events = 0;
   one_end_prev  = 0;
   det_prev      = 0;
+  wide_gap      = 0;   /* ★事件计数防抖（2026-09-22 16:07） */
+  wide_armed    = 1;
 #if USE_D_FILTER
   lpf_init(&d_lpf, D_FILTER_ALPHA);
 #endif
