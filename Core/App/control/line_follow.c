@@ -28,10 +28,12 @@ static uint16_t straight_cycles = 0;   /* 连续"直线"拍数 */
 static uint8_t  boost_active    = 0;   /* 1 = 已进入提速档 */
 
 /* ★葫芦弯相切点状态机（2026-09-22 他提的方案） */
-static uint8_t  edge_pending = 0;      /* 最外路亮之后的"等扩散"倒计时 */
+static uint8_t  gourd_latch  = 0;      /* 分离锁存：一段分离只记 1 次 */
 static uint8_t  gourd_waves  = 0;      /* 已识别的相切点个数（到 3 清零 = 绕完一圈） */
-static uint8_t  gourd_flip   = 0;      /* "翻转修正"剩余拍数 */
-static int8_t   gourd_dir    = 1;      /* 进相切点前的误差方向（翻转的基准） */
+#if GOURD_USE_FLIP
+static uint8_t  gourd_flip   = 0;      /* "翻转修正"剩余拍数（仅 GOURD_USE_FLIP=1 时用） */
+static int8_t   gourd_dir    = 1;      /* 进相切点前的误差方向 */
+#endif
 
 #if USE_D_FILTER
 static lpf_t d_lpf;
@@ -47,30 +49,43 @@ void line_follow_control(int16_t base)
   line_reading_t r = line_read();
   int8_t e = r.error;
 
-  /* ---- ★葫芦弯"外→内扩散波"检测（相切点）----
-     接近相切点时，下一个圆的弧先从传感条【边缘】冒出来（只有最外 1~2 路亮），
-     随后 3 拍内往中间扩散（≥3 路亮）→ 判为一个相切点。 */
+  /* ---- ★葫芦弯相切点检测（判据按 2026-09-22 实测数据定）----
+     实测：相切点处传感条看到"图案分裂成两组、往两边分离"
+        00110011 (3,4 + 7,8) → 11000011 (1,2 + 7,8) → 00000011 (只剩右2)
+     而普通循迹是"连续一小片"(00011000 / 00011100)，
+     十字是"一大片连着亮"(11111111, >=5 路) —— 三种特征天然分得开。
+     规则：最左活跃 L 与最右活跃 R 之间空 >=2 路 → 判"分离"；分离期间只记 1 次（锁存）。*/
 #if USE_GOURD_SM
   {
-    uint8_t outer_hit = (uint8_t)(((r.raw & 0x01u) || (r.raw & 0x80u)) ? 1u : 0u);
-    if (outer_hit && (r.active <= 2u))
+    uint8_t L = 0xFFu, R = 0u, cnt = 0u;
+    for (uint8_t i = 0; i < LINE_CHANNELS; i++)
     {
-      edge_pending = GOURD_EDGE_WINDOW;          /* 线只在最外侧 → 挂起等扩散 */
+      if (r.raw & (uint16_t)(1u << i)) { if (L == 0xFFu) L = i; R = i; cnt++; }
     }
-    else if (edge_pending)
+    uint8_t separated = 0u;
+    if ((L != 0xFFu) && (cnt >= 2u))
     {
-      if (r.active >= 3u)                        /* 扩散确认 = 一个相切点 */
+      uint8_t span = (uint8_t)(R - L + 1u);
+      if ((uint8_t)(span - cnt) >= 2u) separated = 1u;   /* 组内空隙 >=2 路 = 两组 */
+    }
+    if (separated)
+    {
+      if (!gourd_latch)                     /* 上升沿：一个相切点只记一次 */
       {
-        edge_pending = 0;
-        gourd_dir    = (last_error >= 0) ? 1 : -1;
-        gourd_flip   = GOURD_FLIP_CYCLES;        /* 开一个"翻转修正"窗口 */
+        gourd_latch = 1u;
+#if GOURD_USE_FLIP
+        gourd_dir   = (last_error >= 0) ? 1 : -1;
+        gourd_flip  = GOURD_FLIP_CYCLES;
+#else
+        (void)last_error;      /* 翻转关掉时这两个变量不用 */
+#endif
         if (gourd_waves < 200u) gourd_waves++;
-        if (gourd_waves >= GOURD_TOTAL) gourd_waves = 0;   /* 3 次 = 绕完 4 个圆 → 退出 */
+        if (gourd_waves >= GOURD_TOTAL) gourd_waves = 0;   /* 3 个相切点 = 绕完 4 个圆 */
       }
-      else
-      {
-        edge_pending--;
-      }
+    }
+    else
+    {
+      gourd_latch = 0u;
     }
   }
 #endif
@@ -143,7 +158,9 @@ void line_follow_control(int16_t base)
       line_lost = 0;
       e = (int8_t)(last_error * 2);   /* 短暂丢线: 沿上次方向加强修正 */
 #if USE_GOURD_SM
-      if (gourd_flip) e = (int8_t)(-gourd_dir * GOURD_FLIP_ERR);   /* ★葫芦相切点附近: 翻方向修正 */
+#if GOURD_USE_FLIP
+      if (gourd_flip) e = (int8_t)(-gourd_dir * GOURD_FLIP_ERR);
+#endif
 #endif
     }
     else
@@ -189,7 +206,9 @@ void line_follow_control(int16_t base)
   {
     e = (int8_t)(last_error * 2);
 #if USE_GOURD_SM
-    if (gourd_flip) e = (int8_t)(-gourd_dir * GOURD_FLIP_ERR);   /* ★相切点窗口内：翻方向 */
+#if GOURD_USE_FLIP
+    if (gourd_flip) e = (int8_t)(-gourd_dir * GOURD_FLIP_ERR);
+#endif
 #endif
   }
 
@@ -222,7 +241,7 @@ void line_follow_control(int16_t base)
 
   motor_set_differential(m1, m2);
 
-#if USE_GOURD_SM
+#if USE_GOURD_SM && GOURD_USE_FLIP
   if (gourd_flip) gourd_flip--;   /* 翻转窗口倒计时 */
 #endif
 }
@@ -263,7 +282,7 @@ void line_follow_init(void)
   wide_long   = 0;
   straight_cycles = 0;
   boost_active = 0;
-  edge_pending = 0;
+  gourd_latch  = 0;
   gourd_waves  = 0;
   gourd_flip   = 0;
   gourd_dir    = 1;
