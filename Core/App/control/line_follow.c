@@ -29,10 +29,6 @@ static uint8_t  boost_active    = 0;   /* 1 = 已进入提速档 */
 
 /* ★葫芦弯相切点状态机（2026-09-22 他提的方案） */
 static uint8_t  gourd_latch  = 0;      /* 分离锁存：一段分离只记 1 次 */
-
-/* ★分支口"硬转提交"（2026-09-22 按实测数据新增） */
-static int8_t   turn_dir    = 0;       /* 提交方向：+1 右 / -1 左 */
-static uint8_t  turn_left   = 0;       /* 提交剩余拍数 */
 static uint8_t  gourd_waves  = 0;      /* 已识别的相切点个数（到 3 清零 = 绕完一圈） */
 #if GOURD_USE_FLIP
 static uint8_t  gourd_flip   = 0;      /* "翻转修正"剩余拍数（仅 GOURD_USE_FLIP=1 时用） */
@@ -94,29 +90,6 @@ void line_follow_control(int16_t base)
   }
 #endif
 
-  /* ---- ★分支口检测（葫芦出口/直角入口）----
-     宽图案(>=TURN_WIDE_MIN 路) 且"只贴一端、另一端空" → 判为分支口；
-     十字是"两端都贴且连续"，相切点是"两组分离"，三者互不冲突。*/
-#if USE_TURN_COMMIT
-  {
-    uint8_t L = 0xFFu, R = 0u, cnt = 0u;
-    for (uint8_t i = 0; i < LINE_CHANNELS; i++)
-    {
-      if (r.raw & (uint16_t)(1u << i)) { if (L == 0xFFu) L = i; R = i; cnt++; }
-    }
-    if ((L != 0xFFu) && (cnt >= TURN_WIDE_MIN))
-    {
-      uint8_t tL = (L == 0u) ? 1u : 0u;                       /* 贴住最左 */
-      uint8_t tR = (R == (LINE_CHANNELS - 1u)) ? 1u : 0u;     /* 贴住最右 */
-      if (tL != tR)                                          /* 只贴一端 = 偏一侧的宽图案 */
-      {
-        turn_dir  = tR ? 1 : -1;                             /* 宽的那侧 = 要转过去的方向 */
-        turn_left = TURN_COMMIT_FRAMES;
-      }
-    }
-  }
-#endif
-
   /* ---- 速度自适应: 直道快/弯道慢（目标速度是运行时变量, S 指令能同步改） ---- */
   int16_t sp = base;
 #if USE_ADAPTIVE_SPEED
@@ -173,24 +146,6 @@ void line_follow_control(int16_t base)
       sp = tgt;
     }
     boost_active = 1;
-  }
-#endif
-
-  /* ---- ★分支口：闭眼硬转提交（优先于丢线/PD，转完这段再恢复循迹）---- */
-#if USE_TURN_COMMIT
-  if (turn_left)
-  {
-    turn_left--;
-    int16_t spc = sp_curve;                     /* 用弯道速度，别冲 */
-    int16_t c   = (int16_t)(turn_dir * TURN_COMMIT_PWM);
-    int16_t a   = (int16_t)(spc + c);
-    int16_t b   = (int16_t)(spc - c);
-    if (a >  99) a =  99;  if (a < -99) a = -99;
-    if (b >  99) b =  99;  if (b < -99) b = -99;
-    motor_set_differential(a, b);
-    last_error = (int8_t)(turn_dir * 3);        /* 给退出后的 PD 一个合理的起点 */
-    lost_cycles = 0;
-    return;
   }
 #endif
 
@@ -311,11 +266,6 @@ uint8_t line_follow_gourd_waves(void)
   return gourd_waves;
 }
 
-uint8_t line_follow_turn_commit(void)     /* 分支口硬转剩余拍数（>0 = 正在硬转）*/
-{
-  return turn_left;
-}
-
 uint8_t line_follow_boost_active(void)
 {
   return boost_active;
@@ -334,8 +284,6 @@ void line_follow_init(void)
   boost_active = 0;
   gourd_latch  = 0;
   gourd_waves  = 0;
-  turn_dir     = 0;
-  turn_left    = 0;
 #if GOURD_USE_FLIP
   gourd_flip   = 0;
   gourd_dir    = 1;
