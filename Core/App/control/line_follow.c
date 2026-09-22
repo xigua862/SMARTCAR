@@ -25,9 +25,10 @@ static uint8_t  wide_cnt    = 0;   /* 宽图案持续拍数 */
 static uint8_t  on_cross    = 0;   /* 1 = 判定为十字（直行通过） */
 static uint8_t  wide_long   = 0;   /* 1 = 宽图案持续过久 → 不是十字（圆出口/直角入口） */
 /* ★2026-09-22 15:31 十字判据修正 + 事件计数/打印 */
-static uint16_t cross_events = 0;  /* 一趟里"判成十字"的次数（遥测 CX=） */
+static uint16_t cross_events = 0;  /* 一趟里"判定为十字"的次数（遥测 CX=） */
 static uint16_t branch_events = 0; /* 一趟里"宽图案只贴一端 → 拒绝当十字"的次数（遥测 BR=） */
 static uint8_t  one_end_prev = 0;  /* 上一拍是否"只贴一端的宽图案"（边沿，防刷屏） */
+static uint8_t  det_prev     = 0;  /* 上一拍是否"落在十字时间窗"（边沿，给预算计数用） */
 
 /* ★直线提速（2026-09-22） */
 static uint16_t straight_cycles = 0;   /* 连续"直线"拍数 */
@@ -204,19 +205,38 @@ void line_follow_control(int16_t base)
       wide_cnt = 0;
     }
 
-    uint8_t cross_now = ((wide_cnt >= CROSS_CONFIRM_CNT) && (wide_cnt <= CROSS_MAX_FRAMES)) ? 1u : 0u;
+    uint8_t detected = ((wide_cnt >= CROSS_CONFIRM_CNT) && (wide_cnt <= CROSS_MAX_FRAMES)) ? 1u : 0u;
     wide_long = (wide_cnt > CROSS_MAX_FRAMES) ? 1u : 0u;
+
+    /* 每个"宽图案落在十字时间窗"的事件记一次（上升沿），供预算层比较 */
+    uint8_t det_rising = (detected && !det_prev) ? 1u : 0u;
+    if (det_rising && (cross_events < 60000u)) cross_events++;
+    det_prev = detected;
+
+    uint8_t cross_now = detected;
+#if USE_CROSS_BUDGET
+    /* ★预算层：真十字触发次数有限（本赛道 = 2 个十字 × 2 次 = 4）→ 第 5 次起一律判为假十字
+       （葫芦的假触发），交回 PD 转，不再强制直行。见 app_config.h 的说明与前提。 */
+    if (cross_now && (cross_events > CROSS_BUDGET_MAX)) cross_now = 0u;
+#endif
 
 #if CROSS_PRINT
     char msg_cross[96];
-    if (cross_now && !on_cross)                  /* 判成十字的"上升沿" → 一次事件打一行 */
+    if (det_rising)                              /* 一次事件打一行（上升沿，不刷屏） */
     {
       char irs[LINE_CHANNELS + 1];
       for (uint8_t i = 0; i < LINE_CHANNELS; i++) irs[i] = (r.raw >> i) & 1u ? '1' : '0';
       irs[LINE_CHANNELS] = '\0';
-      if (cross_events < 60000u) cross_events++;
-      snprintf(msg_cross, sizeof(msg_cross), "CROSS #%d IR=%s wide=%d",
-               (int)cross_events, irs, (int)wide_cnt);
+      if (cross_now)
+      {
+        snprintf(msg_cross, sizeof(msg_cross), "CROSS #%d IR=%s wide=%d (straight)",
+                 (int)cross_events, irs, (int)wide_cnt);
+      }
+      else
+      {
+        snprintf(msg_cross, sizeof(msg_cross), "CROSS #%d IR=%s BLOCKED(budget %d) -> turn",
+                 (int)cross_events, irs, (int)CROSS_BUDGET_MAX);
+      }
       telemetry_msg(msg_cross);
     }
     if (one_end && !one_end_prev)                /* 宽图案只贴一端 → 拒绝了十字 → 也打一行 */
@@ -457,6 +477,7 @@ void line_follow_init(void)
   cross_events  = 0;   /* ★十字事件计数（2026-09-22 15:31） */
   branch_events = 0;
   one_end_prev  = 0;
+  det_prev      = 0;
 #if USE_D_FILTER
   lpf_init(&d_lpf, D_FILTER_ALPHA);
 #endif
