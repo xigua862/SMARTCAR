@@ -15,4 +15,9 @@ uint8_t line_follow_on_cross(void);   /* 1 = 当前判定为十字(强制直行�
 
 uint8_t line_follow_gourd_waves(void);   /* 葫芦弯已识别的相切点个数(0~2, 到3清零) */
 uint8_t line_follow_boost_active(void);  /* 1 = 直线提速档生效中 */
+
+/* ★弯道计数 → 强制右转（2026-09-22 他提的方案） */
+uint16_t line_follow_g7_count(void);     /* 最右一路(bit7)已触发次数(遥测 G7=, 边沿计数) */
+uint8_t  line_follow_g7_flag(void);      /* 1 = 已触发过"出葫芦弯道"(锁存, 遥测 GX=) */
+uint8_t  line_follow_turn_left(void);    /* 硬转剩余拍数(>0 = 正在硬转, 遥测 GR=) */
 #endif /* LINE_FOLLOW_H */

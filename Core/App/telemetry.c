@@ -76,14 +76,17 @@ void telemetry_report(void)
     ir[i] = (r.raw >> i) & 1u ? '1' : '0';
   ir[LINE_CHANNELS] = '\0';
 
-  char buf[176];
+  char buf[200];
   int n = snprintf(buf, sizeof(buf),
-    "FW:%s IR:%s RPM1=%d RPM2=%d KP=%d.%d SP=%d ST=%d GZ=%d GW=%d SB=%d\r\n",
+    "FW:%s IR:%s RPM1=%d RPM2=%d KP=%d.%d SP=%d ST=%d GZ=%d GW=%d SB=%d G7=%d GX=%d GR=%d\r\n",
     FW_TAG, ir,
     speed_get_rpm(MOTOR_LEFT), speed_get_rpm(MOTOR_RIGHT),
     kp_x10 / 10, kp_x10 % 10,
     sp_straight, (int)car_fsm_state(),
-    (int)imu_get_gyro_z(), (int)line_follow_gourd_waves(), (int)line_follow_boost_active());
+    (int)imu_get_gyro_z(), (int)line_follow_gourd_waves(), (int)line_follow_boost_active(),
+    (int)line_follow_g7_count(),      /* ★最右一路(bit7)已触发次数 —— 用它定 G7_TURN_TRIG */
+    (int)line_follow_g7_flag(),       /* 1 = 已触发过"出葫芦弯道" */
+    (int)line_follow_turn_left());    /* >0 = 正在强制右转（剩余拍数） */
   if (n > 0)
     HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)n, 100);
 }

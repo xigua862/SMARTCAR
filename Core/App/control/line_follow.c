@@ -4,6 +4,7 @@
 #include "drivers/motor.h"
 #include "drivers/line_sensor.h"
 #include "control/filter.h"
+#include "telemetry.h"        /* ★事件打印用 telemetry_msg("出葫芦弯道" 等) */
 #if USE_IMU
 #include "drivers/imu.h"
 #endif
@@ -34,6 +35,16 @@ static uint8_t  gourd_waves  = 0;      /* 已识别的相切点个数（到 3 �
 static uint8_t  gourd_flip   = 0;      /* "翻转修正"剩余拍数（仅 GOURD_USE_FLIP=1 时用） */
 static int8_t   gourd_dir    = 1;      /* 进相切点前的误差方向 */
 #endif
+
+/* ★弯道计数 → 强制右转（2026-09-22 他提的方案）
+   ★这几个变量【无条件声明】（不放进 #if）—— 2026-09-22 那次"宏开关漏罩 init"的编译事故
+   就是 #if 范围不一致造成的，这里一律全声明、只在真正使用的地方 #if。 */
+static uint16_t g7_count   = 0;   /* 最右一路(bit7)累计触发次数（上升沿计数） */
+static uint8_t  g7_prev    = 0;   /* 上一拍 bit7 电平（边沿检测用） */
+static uint8_t  g7_lock    = 0;   /* 计数锁：>0 时不许再计（防抖 / 防一次点亮算多次） */
+static uint8_t  g7_waitmsg = 0;   /* "数够但位置不对"只打印一次 */
+static uint8_t  g7_flag    = 0;   /* 1 = 已触发过"出葫芦弯道"（锁存，给遥测显示） */
+static uint8_t  g7_turn    = 0;   /* 硬转剩余拍数（>0 = 正在硬转，期间忽略传感器） */
 
 #if USE_D_FILTER
 static lpf_t d_lpf;
@@ -86,6 +97,60 @@ void line_follow_control(int16_t base)
     else
     {
       gourd_latch = 0u;
+    }
+  }
+#endif
+
+  /* ---- ★弯道计数：数"最右一路"(bit7)的【上升沿】次数（2026-09-22 他提的方案）----
+     边沿计数 + 锁存间隔：一次持续点亮只算 1 次，且不会被 10ms 拍/速度绑死。
+     遥测 G7= 就是它（跑一圈看它在葫芦出口读到多少 → 用它改 G7_TURN_TRIG）。 */
+#if USE_G7_COUNT
+  {
+    uint8_t b7 = (uint8_t)((r.raw >> (LINE_CHANNELS - 1u)) & 1u);   /* bit7 = 最右一路 */
+    if (g7_lock) g7_lock--;
+    if (b7 && !g7_prev && (g7_lock == 0u))          /* 暗→亮 = 一次触发 */
+    {
+      if (g7_count < 60000u) g7_count++;
+      g7_lock = G7_LOCKOUT;
+    }
+    g7_prev = b7;
+  }
+#endif
+
+  /* ---- ★数到阈值 → 强制右转（默认先等"分支口"确认，见 G7_TURN_GATE_BRANCH）---- */
+#if USE_G7_COUNT && USE_G7_TURN
+  if ((g7_turn == 0u) && (g7_count >= G7_TURN_TRIG))
+  {
+    uint8_t fire = 1u;
+#if G7_TURN_GATE_BRANCH
+    /* 分支口 = 宽图案(>=G7_GATE_WIDE_MIN 路) 且 只贴一端（另一端空）= 葫芦出口/直角入口 */
+    uint8_t L = 0xFFu, R = 0u, cnt = 0u;
+    for (uint8_t i = 0; i < LINE_CHANNELS; i++)
+    {
+      if (r.raw & (uint16_t)(1u << i)) { if (L == 0xFFu) L = i; R = i; cnt++; }
+    }
+    if ((L == 0xFFu) || (cnt < G7_GATE_WIDE_MIN))  fire = 0u;
+    else
+    {
+      uint8_t tL = (L == 0u) ? 1u : 0u;
+      uint8_t tR = (R == (LINE_CHANNELS - 1u)) ? 1u : 0u;
+      fire = (tL != tR) ? 1u : 0u;                 /* 只贴一端才算分支口 */
+    }
+#endif
+    if (fire)
+    {
+      g7_turn    = G7_TURN_FRAMES;
+      g7_count   = 0u;                             /* 触发后清零，重新开始数下一段 */
+      g7_waitmsg = 0u;
+      g7_flag    = 1u;
+      telemetry_msg("GOURD EXIT (G7 count) -> FORCE RIGHT");
+    }
+    else if (!g7_waitmsg)
+    {
+      /* 数够了、但这一刻不是分支口 → 不转（防直道上拐出去），等分支口出现那一拍再转。
+         这条打印是给你看的：出现它说明"阈值 12 和出口的位置对不上"，该改 G7_TURN_TRIG。 */
+      g7_waitmsg = 1u;
+      telemetry_msg("G7 HIT but not BRANCH (wait)");
     }
   }
 #endif
@@ -146,6 +211,24 @@ void line_follow_control(int16_t base)
       sp = tgt;
     }
     boost_active = 1;
+  }
+#endif
+
+  /* ---- ★强制右转提交：硬转期间【闭着眼转】，忽略传感器，转完再交回 PD ----
+     优先级高于丢线/PD：故意急转的时候传感器误差是误导的（会把自己拽回来 → 来回摆）。 */
+#if USE_G7_COUNT && USE_G7_TURN
+  if (g7_turn)
+  {
+    g7_turn--;
+    int16_t a = (int16_t)(sp_curve + G7_TURN_PWM);   /* 左快右慢 = 右转 */
+    int16_t b = (int16_t)(sp_curve - G7_TURN_PWM);
+    if (a >  99) a =  99;  if (a < -99) a = -99;
+    if (b >  99) b =  99;  if (b < -99) b = -99;
+    motor_set_differential(a, b);
+    last_error  = 3;                 /* 给退出后的 PD 一个合理起点（偏右） */
+    lost_cycles = 0;
+    line_lost   = 0;
+    return;
   }
 #endif
 
@@ -271,6 +354,22 @@ uint8_t line_follow_boost_active(void)
   return boost_active;
 }
 
+/* ★弯道计数（2026-09-22 他提的方案）—— 这三个无条件提供，遥测/状态机直接用 */
+uint16_t line_follow_g7_count(void)
+{
+  return g7_count;      /* 最右一路已触发次数（实时，跑一圈看它在出口读到多少） */
+}
+
+uint8_t line_follow_g7_flag(void)
+{
+  return g7_flag;       /* 1 = 触发过"出葫芦弯道"（锁存，看到它说明真的触发了） */
+}
+
+uint8_t line_follow_turn_left(void)
+{
+  return g7_turn;       /* 硬转剩余拍数（>0 = 正在硬转） */
+}
+
 void line_follow_init(void)
 {
   last_error  = 0;
@@ -288,6 +387,12 @@ void line_follow_init(void)
   gourd_flip   = 0;
   gourd_dir    = 1;
 #endif
+  g7_count   = 0;      /* ★弯道计数（无条件复位，别放进 #if —— 上次编译事故就是这么来的） */
+  g7_prev    = 0;
+  g7_lock    = 0;
+  g7_waitmsg = 0;
+  g7_flag    = 0;
+  g7_turn    = 0;
 #if USE_D_FILTER
   lpf_init(&d_lpf, D_FILTER_ALPHA);
 #endif
