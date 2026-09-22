@@ -76,14 +76,15 @@ void telemetry_report(void)
     ir[i] = (r.raw >> i) & 1u ? '1' : '0';
   ir[LINE_CHANNELS] = '\0';
 
-  char buf[176];
+  char buf[192];
   int n = snprintf(buf, sizeof(buf),
-    "FW:%s IR:%s RPM1=%d RPM2=%d KP=%d.%d SP=%d ST=%d GZ=%d GW=%d SB=%d\r\n",
+    "FW:%s IR:%s RPM1=%d RPM2=%d KP=%d.%d SP=%d ST=%d GZ=%d GW=%d SB=%d TC=%d\r\n",
     FW_TAG, ir,
     speed_get_rpm(MOTOR_LEFT), speed_get_rpm(MOTOR_RIGHT),
     kp_x10 / 10, kp_x10 % 10,
     sp_straight, (int)car_fsm_state(),
-    (int)imu_get_gyro_z(), (int)line_follow_gourd_waves(), (int)line_follow_boost_active());
+    (int)imu_get_gyro_z(), (int)line_follow_gourd_waves(), (int)line_follow_boost_active(),
+    (int)line_follow_turn_commit());
   if (n > 0)
     HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)n, 100);
 }
