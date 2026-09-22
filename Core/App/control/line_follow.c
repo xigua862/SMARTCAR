@@ -5,6 +5,7 @@
 #include "drivers/line_sensor.h"
 #include "control/filter.h"
 #include "telemetry.h"        /* ★事件打印用 telemetry_msg("出葫芦弯道" 等) */
+#include <stdio.h>            /* snprintf: 拼"十字/分支口"事件行 */
 #if USE_IMU
 #include "drivers/imu.h"
 #endif
@@ -23,6 +24,10 @@ static uint8_t  line_lost   = 0;
 static uint8_t  wide_cnt    = 0;   /* 宽图案持续拍数 */
 static uint8_t  on_cross    = 0;   /* 1 = 判定为十字（直行通过） */
 static uint8_t  wide_long   = 0;   /* 1 = 宽图案持续过久 → 不是十字（圆出口/直角入口） */
+/* ★2026-09-22 15:31 十字判据修正 + 事件计数/打印 */
+static uint16_t cross_events = 0;  /* 一趟里"判成十字"的次数（遥测 CX=） */
+static uint16_t branch_events = 0; /* 一趟里"宽图案只贴一端 → 拒绝当十字"的次数（遥测 BR=） */
+static uint8_t  one_end_prev = 0;  /* 上一拍是否"只贴一端的宽图案"（边沿，防刷屏） */
 
 /* ★直线提速（2026-09-22） */
 static uint16_t straight_cycles = 0;   /* 连续"直线"拍数 */
@@ -173,17 +178,61 @@ void line_follow_control(int16_t base)
 #endif
 
   /* ---- ★宽图案判定 ---- 真十字: 25mm 横线扫过 → 只持续几拍
-     葫芦弯出口/直角入口: "圆切线+垂直线" → 持续更久 → 不能直行 */
-  if (r.active >= CROSS_ACTIVE_MIN)
+     葫芦弯出口/直角入口: "圆切线+垂直线" → 持续更久 → 不能直行
+     ★2026-09-22 15:31 修根因：十字还必须【两端都贴住】(CROSS_NEED_BOTH_ENDS) */
   {
-    if (wide_cnt < 200u) wide_cnt++;
+    uint8_t wide    = (r.active >= CROSS_ACTIVE_MIN) ? 1u : 0u;
+    uint8_t one_end = 0u;
+#if CROSS_NEED_BOTH_ENDS
+    if (wide)
+    {
+      uint8_t b0 = (uint8_t)( r.raw                  & 1u);   /* 最左一路 */
+      uint8_t b7 = (uint8_t)((r.raw >> (LINE_CHANNELS - 1u)) & 1u);   /* 最右一路 */
+      if (!(b0 && b7))
+      {
+        wide    = 0u;      /* 只贴一端 = 分支口/圆出口，不是十字 → 不直行，交给 PD 转 */
+        one_end = 1u;
+      }
+    }
+#endif
+    if (wide)
+    {
+      if (wide_cnt < 200u) wide_cnt++;
+    }
+    else
+    {
+      wide_cnt = 0;
+    }
+
+    uint8_t cross_now = ((wide_cnt >= CROSS_CONFIRM_CNT) && (wide_cnt <= CROSS_MAX_FRAMES)) ? 1u : 0u;
+    wide_long = (wide_cnt > CROSS_MAX_FRAMES) ? 1u : 0u;
+
+#if CROSS_PRINT
+    char msg_cross[96];
+    if (cross_now && !on_cross)                  /* 判成十字的"上升沿" → 一次事件打一行 */
+    {
+      char irs[LINE_CHANNELS + 1];
+      for (uint8_t i = 0; i < LINE_CHANNELS; i++) irs[i] = (r.raw >> i) & 1u ? '1' : '0';
+      irs[LINE_CHANNELS] = '\0';
+      if (cross_events < 60000u) cross_events++;
+      snprintf(msg_cross, sizeof(msg_cross), "CROSS #%d IR=%s wide=%d",
+               (int)cross_events, irs, (int)wide_cnt);
+      telemetry_msg(msg_cross);
+    }
+    if (one_end && !one_end_prev)                /* 宽图案只贴一端 → 拒绝了十字 → 也打一行 */
+    {
+      char irs[LINE_CHANNELS + 1];
+      for (uint8_t i = 0; i < LINE_CHANNELS; i++) irs[i] = (r.raw >> i) & 1u ? '1' : '0';
+      irs[LINE_CHANNELS] = '\0';
+      if (branch_events < 60000u) branch_events++;
+      snprintf(msg_cross, sizeof(msg_cross), "BRANCH #%d IR=%s -> NOT cross (turn)",
+               (int)branch_events, irs);
+      telemetry_msg(msg_cross);
+    }
+#endif
+    one_end_prev = one_end;
+    on_cross     = cross_now;
   }
-  else
-  {
-    wide_cnt = 0;
-  }
-  on_cross  = (wide_cnt >= CROSS_CONFIRM_CNT) && (wide_cnt <= CROSS_MAX_FRAMES);
-  wide_long = (wide_cnt > CROSS_MAX_FRAMES);
 
   /* ---- ★直线提速：连续"直线"够久 → 直接冲到 99（慢起快落）---- */
 #if USE_STRAIGHT_BOOST
@@ -370,6 +419,18 @@ uint8_t line_follow_turn_left(void)
   return g7_turn;       /* 硬转剩余拍数（>0 = 正在硬转） */
 }
 
+/* ★十字事件计数（2026-09-22 15:31）—— 跑一圈看 CX= 就知道一趟里被判了几次十字 */
+uint16_t line_follow_cross_events(void)
+{
+  return cross_events;
+}
+
+/* ★"宽图案只贴一端 → 拒绝当十字"的次数（证明"出口不再被误当十字"的修复在起作用） */
+uint16_t line_follow_branch_events(void)
+{
+  return branch_events;
+}
+
 void line_follow_init(void)
 {
   last_error  = 0;
@@ -393,6 +454,9 @@ void line_follow_init(void)
   g7_waitmsg = 0;
   g7_flag    = 0;
   g7_turn    = 0;
+  cross_events  = 0;   /* ★十字事件计数（2026-09-22 15:31） */
+  branch_events = 0;
+  one_end_prev  = 0;
 #if USE_D_FILTER
   lpf_init(&d_lpf, D_FILTER_ALPHA);
 #endif

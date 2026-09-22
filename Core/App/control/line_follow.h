@@ -20,4 +20,8 @@ uint8_t line_follow_boost_active(void);  /* 1 = 直线提速档生效中 */
 uint16_t line_follow_g7_count(void);     /* 最右一路(bit7)已触发次数(遥测 G7=, 边沿计数) */
 uint8_t  line_follow_g7_flag(void);      /* 1 = 已触发过"出葫芦弯道"(锁存, 遥测 GX=) */
 uint8_t  line_follow_turn_left(void);    /* 硬转剩余拍数(>0 = 正在硬转, 遥测 GR=) */
+
+/* ★十字事件计数（2026-09-22 15:31 修"葫芦出口被误当十字"时加的） */
+uint16_t line_follow_cross_events(void);  /* 一趟里"判成十字"的次数(遥测 CX=) */
+uint16_t line_follow_branch_events(void); /* 一趟里"宽图案只贴一端→拒绝当十字"的次数(遥测 BR=) */
 #endif /* LINE_FOLLOW_H */
