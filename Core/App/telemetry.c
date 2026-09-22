@@ -10,6 +10,7 @@
 #include "drivers/buzzer.h"
 #include "drivers/led.h"
 #include "drivers/imu.h"
+#include "main.h"
 #include "control/line_follow.h"
 #include "fsm/car_fsm.h"
 
@@ -22,10 +23,29 @@ static          char     cmd_line[32];
 static          uint8_t  cmd_len   = 0;
 static volatile uint8_t  cmd_ready = 0;
 
+/* ★2026-09-22：给状态机用的"事件打印"（急停原因/解除等），自带换行 */
+void telemetry_msg(const char *msg)
+{
+  uint16_t n = 0;
+  while (msg[n] != 0 && n < 100) n++;
+  if (n) HAL_UART_Transmit(&huart1, (uint8_t*)msg, n, 100);
+  HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n", 2, 100);
+}
+
 void telemetry_init(void)
 {
   HAL_NVIC_EnableIRQ(USART1_IRQn);          /* 开串口接收中断(在线调参) */
   USART1->CR1 |= USART_CR1_RXNEIE;          /* 直接使能RXNE中断(绕开HAL状态机, 防卡死) */
+
+  /* ★2026-09-22：PA10(RX) 悬空时会被电机 EMI 灌入 → 凑出假命令(尤其 X → 锁车)。
+     重新配成"输入 + 上拉"，空闲电平稳稳在高；线没接也不会误触发。 */
+  {
+    GPIO_InitTypeDef gi = {0};
+    gi.Pin  = GPIO_PIN_10;
+    gi.Mode = GPIO_MODE_INPUT;
+    gi.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(GPIOA, &gi);
+  }
 }
 
 /* 上电横幅：一眼确认"烧没烧、烧的是哪版"（编译时间由编译器自动填，不用手工维护） */
@@ -76,6 +96,9 @@ void telemetry_process_command(void)
 
   char  c = (char)(cmd_line[0] & 0xDF);   /* 首字母转大写 */
   float v = atof(cmd_line + 1);           /* 兼容 "P 15" 和 "P15" */
+
+  /* ★2026-09-22：白名单 —— 只认已知命令；噪声凑出来的字符串直接丢掉，不回话 */
+  if (strchr("PSDTMLBRVHX", c) == NULL) return;
   char buf[112];
   int  n = 0;
 
@@ -177,16 +200,23 @@ void telemetry_process_command(void)
     buzzer_beep((uint16_t)ms);
     n = snprintf(buf, sizeof(buf), "OK BEEP %dms\r\n", ms);
   }
-  else if (c == 'X')                        /* 急停：按键不可用时的"刹车"（发一个 X 回车即可） */
+  else if (c == 'X')                        /* ★急停：必须连发两个 X（XX），防噪声误触发锁车 */
   {
-    test_mode = 0;
-    car_fsm_emergency_stop();
-    n = snprintf(buf, sizeof(buf), "OK EMERGENCY-STOP (ST=4; 想再跑请重新上电)\r\n");
+    if ((cmd_line[1] & 0xDF) == 'X')
+    {
+      test_mode = 0;
+      car_fsm_emergency_stop_cause(2u);     /* 2 = 串口触发 */
+      n = snprintf(buf, sizeof(buf), "OK EMERGENCY-STOP by SERIAL (ST=4; hold START 2s to clear)\r\n");
+    }
+    else
+    {
+      n = snprintf(buf, sizeof(buf), "USE: XX (two letters) to emergency-stop\r\n");
+    }
   }
   else
   {
     n = snprintf(buf, sizeof(buf),
-      "CMD: P<KP> / S<SPD> / D<KD> / T<1|2><spd> / M<L><R> / L<0~7> / B[ms] / R(启动) / V(版本) / H(诊断) / X(急停)\r\n");
+      "CMD: P<KP> / S<SPD> / D<KD> / T<1|2><spd> / M<L><R> / L<0~7> / B[ms] / R(启动) / V(版本) / H(diag) / XX(emergency stop)\r\n");
   }
   if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)n, 100);
 }

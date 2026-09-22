@@ -22,7 +22,9 @@ car_state_t car_fsm_state(void);
 
 /* 状态切换接口 */
 void car_fsm_request_start(void);   /* IDLE/STOPPED → COUNTDOWN */
-void car_fsm_emergency_stop(void);  /* 任意 → EMERGENCY */
+void car_fsm_emergency_stop(void);              /* 任意 → EMERGENCY */
+void car_fsm_emergency_stop_cause(uint8_t c);   /* 带原因: 1=按键 2=串口 3=其它 */
+uint8_t car_fsm_emg_cause(void);                /* 查急停原因 */
 void car_fsm_finish(void);          /* RUN → STOPPED(到站, 停车+长鸣+闪灯) */
 
 #endif /* CAR_FSM_H */

@@ -119,7 +119,17 @@ void line_follow_control(int16_t base)
   }
   if (straight_cycles >= STRAIGHT_BOOST_DELAY)
   {
-    sp = STRAIGHT_BOOST_SPEED;
+    /* ★斜坡提速：每拍最多涨 STRAIGHT_BOOST_RAMP，避免瞬跳（原版直接跳 99）*/
+    int16_t tgt = STRAIGHT_BOOST_SPEED;
+    if (sp < tgt)
+    {
+      sp = (int16_t)(sp + STRAIGHT_BOOST_RAMP);
+      if (sp > tgt) sp = tgt;
+    }
+    else
+    {
+      sp = tgt;
+    }
     boost_active = 1;
   }
 #endif
@@ -133,7 +143,7 @@ void line_follow_control(int16_t base)
       line_lost = 0;
       e = (int8_t)(last_error * 2);   /* 短暂丢线: 沿上次方向加强修正 */
 #if USE_GOURD_SM
-      if (gourd_flip) e = (int8_t)(-gourd_dir * 3);   /* ★葫芦相切点附近: 翻方向修正 */
+      if (gourd_flip) e = (int8_t)(-gourd_dir * GOURD_FLIP_ERR);   /* ★葫芦相切点附近: 翻方向修正 */
 #endif
     }
     else
@@ -179,7 +189,7 @@ void line_follow_control(int16_t base)
   {
     e = (int8_t)(last_error * 2);
 #if USE_GOURD_SM
-    if (gourd_flip) e = (int8_t)(-gourd_dir * 3);     /* ★相切点窗口内：翻方向 */
+    if (gourd_flip) e = (int8_t)(-gourd_dir * GOURD_FLIP_ERR);   /* ★相切点窗口内：翻方向 */
 #endif
   }
 

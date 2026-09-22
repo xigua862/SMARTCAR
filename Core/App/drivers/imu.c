@@ -33,20 +33,20 @@ static float   gyro_bx = 0.0f, gyro_by = 0.0f, gyro_bz = 0.0f;  /* 三轴零偏 
 
 static void imu_write_reg(uint8_t reg, uint8_t val)
 {
-  HAL_I2C_Mem_Write(&hi2c2, MPU_ADDR, reg, 1, &val, 1, 50);
+  HAL_I2C_Mem_Write(&hi2c2, MPU_ADDR, reg, 1, &val, 1, IMU_I2C_TIMEOUT);
 }
 
 static uint8_t imu_read_reg(uint8_t reg)
 {
   uint8_t v = 0;
-  HAL_I2C_Mem_Read(&hi2c2, MPU_ADDR, reg, 1, &v, 1, 50);
+  HAL_I2C_Mem_Read(&hi2c2, MPU_ADDR, reg, 1, &v, 1, IMU_I2C_TIMEOUT);
   return v;
 }
 
 static void imu_read_raw(void)
 {
   uint8_t d[14];
-  if (HAL_I2C_Mem_Read(&hi2c2, MPU_ADDR, 0x3B, 1, d, 14, 50) != HAL_OK) return;
+  if (HAL_I2C_Mem_Read(&hi2c2, MPU_ADDR, 0x3B, 1, d, 14, IMU_I2C_TIMEOUT) != HAL_OK) return;
   ax = (int16_t)((d[0] << 8) | d[1]);
   ay = (int16_t)((d[2] << 8) | d[3]);
   az = (int16_t)((d[4] << 8) | d[5]);

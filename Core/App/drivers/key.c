@@ -9,6 +9,7 @@ static uint8_t  press_evt   = 0;
 static uint8_t  long_evt    = 0;
 static uint8_t  long_fired  = 0;   /* 本次按住已经报过长按 */
 static uint32_t press_tick  = 0;
+static uint32_t boot_tick   = 0;   /* ★开机时刻：前 300ms 忽略按键（防上电抖动/压住）*/
 
 static uint8_t key_raw_down(void)
 {
@@ -17,6 +18,9 @@ static uint8_t key_raw_down(void)
 
 void key_init(void)
 {
+  boot_tick  = HAL_GetTick();      /* ★2026-09-22 修：press_tick 原来初值 0 →
+                                      上电瞬间按键若已按下, 1 秒内会误报一次长按 → 一起步就急停 */
+  press_tick = boot_tick;
   last_raw   = key_raw_down();
   stable     = last_raw;
   cnt        = 0;
@@ -48,7 +52,8 @@ void key_update(void)
     }
   }
 
-  /* 按住够久 → 长按事件(只报一次) */
+  /* 按住够久 → 长按事件(只报一次)；开机头 300ms 不认（防上电抖动） */
+  if ((HAL_GetTick() - boot_tick) < 300u) return;
   if (stable && !long_fired && (HAL_GetTick() - press_tick >= KEY_LONG_PRESS_MS))
   {
     long_evt   = 1;
