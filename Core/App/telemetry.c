@@ -69,7 +69,9 @@ void telemetry_banner(void)
 /* 打印当前状态: 版本标签 + IR 8 路位图 + RPM + KP/KD/SP + 状态机状态 */
 void telemetry_report(void)
 {
-  speed_update();                            /* 计算本窗口 RPM 并清零窗口计数 */
+  /* ★2026-09-23 晚：speed_update() 不再在这里调用 —— 已挪到 app_loop 的控制拍里
+     （10ms 一次）。原来只在这里算 → 速度闭环拿到的是 50ms 前的旧值。
+     这里只读走最新值打印。 */
   line_reading_t r = line_read();
 
   char ir[LINE_CHANNELS + 1];

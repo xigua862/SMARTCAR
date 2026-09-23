@@ -62,16 +62,21 @@ void app_loop(void)
     odom_update();           /* ★里程累加(与 UI 同节拍 = 10ms, 60ms 内就能发现 16 位回绕) */
   }
 
-  /* 控制节拍: 状态机驱动循迹(单电机测试时让位给 T 指令) */
-  if (test_mode == 0)
+  /* 控制节拍：测速 + 状态机驱动循迹（单电机测试时，状态机让位给 T/M 指令） */
+  if (now - t_ctl >= CTRL_PERIOD_MS)
   {
-    if (now - t_ctl >= CTRL_PERIOD_MS)
-    {
-      uint32_t prev = t_ctl;
-      t_ctl = now;
-      if (prev != 0u) loop_dt_ms = (uint16_t)(now - prev);   /* ★实测周期, 遥测 DT= */
-      car_fsm_run((uint32_t)CTRL_PERIOD_MS);
-    }
+    uint32_t prev = t_ctl;
+    t_ctl = now;
+    if (prev != 0u) loop_dt_ms = (uint16_t)(now - prev);   /* ★实测周期, 遥测 DT= */
+
+    /* ★2026-09-23 晚，修正闭环的一个致命细节：
+       原来 speed_update() 【只在 telemetry_report() 里】被调用（全工程唯一调用点）→
+       闭环虽然每 10ms 跑一次，却只能读到"50ms 前的旧转速"，**连续 5 拍用同一个值**。
+       实测症状：闭环能把转速稳在目标附近，但稳态差 2~7%、修正很慢。
+       现在挪到控制拍里（10ms 一次）→ 反馈新鲜；遥测只是把这个值读走打印。 */
+    speed_update();
+
+    if (test_mode == 0) car_fsm_run((uint32_t)CTRL_PERIOD_MS);
   }
 
   /* 测速 + 遥测打印：待机 500ms 一行；读秒/运行中 50ms 一行(20Hz, 看循迹过程) */
