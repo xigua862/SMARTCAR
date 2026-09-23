@@ -14,6 +14,30 @@
 #include "drivers/speed.h"
 #endif
 
+/* ============================================================================
+ * ★决策优先级（谁覆盖谁）—— 2026-09-23 补，改之前先读这段
+ *
+ * line_follow_control() 里跑了 9 层判断，顺序就是优先级；两个地方会提前 return：
+ *
+ *   1. 葫芦"图案分裂"检测        （只记事件，不直接控制）
+ *   2. G7 最右一路上升沿计数      （只记事件）
+ *   3. G7 硬转 → 直接 return     ★最高优先级：闭眼转，忽略传感器
+ *   4. 速度自适应（直道/弯道/丢线）
+ *   5. 十字：形状判据 + 预算层 + 事件防抖（只记事件/判定标志）
+ *   6. 直线提速（斜坡）
+ *   7. 丢线兜底 → 直接 return    ★次高：加强修正 / 原地旋转 / 超时停车
+ *   8. on_cross 强制直行(e=0)  /  wide_long 继续转(e=last_error*2)
+ *   9. PD + 低通 + 差速输出 → motor_set_differential()
+ *
+ * ⚠️ 已知耦合（别踩）：第 3 步会写死 last_error = 3（给退出后的 PD 铺路），
+ *    而 last_error 还被下游两处用着 —— 丢线的 last_error*2、葫芦的 gourd_dir。
+ *    也就是说"硬转过一次"会**污染**这两处的判断。目前 GOURD_USE_FLIP=0 影响有限，
+ *    但以后要打开翻转、或改丢线修正之前，先回来想清楚这个耦合。
+ *
+ * ⚠️ 历史教训：2026-09-22 那 10 个提交里出现过 2 次"编译不过/加了又回退"，
+ *    都是这类顺序/开关范围不同步造成的。加层时**先想清楚它插在哪一层、要不要 return**。
+ * ==========================================================================*/
+
 /* 丢线/上次误差状态 */
 static int8_t   last_error  = 0;
 static int8_t   last_e      = 0;   /* 上一次误差(PD 微分用) */
@@ -50,7 +74,11 @@ static int8_t   gourd_dir    = 1;      /* 进相切点前的误差方向 */
 static uint16_t g7_count   = 0;   /* 最右一路(bit7)累计触发次数（上升沿计数） */
 static uint8_t  g7_prev    = 0;   /* 上一拍 bit7 电平（边沿检测用） */
 static uint8_t  g7_lock    = 0;   /* 计数锁：>0 时不许再计（防抖 / 防一次点亮算多次） */
+#if USE_G7_COUNT && USE_G7_TURN
+/* ★这个变量只在"硬转开着"时才存在：声明/写/读必须在同一个 #if 条件下，
+   否则关掉硬转时会出现 "declared but never referenced" / "set but never used" 告警。 */
 static uint8_t  g7_waitmsg = 0;   /* "数够但位置不对"只打印一次 */
+#endif
 static uint8_t  g7_flag    = 0;   /* 1 = 已触发过"出葫芦弯道"（锁存，给遥测显示） */
 static uint8_t  g7_turn    = 0;   /* 硬转剩余拍数（>0 = 正在硬转，期间忽略传感器） */
 
@@ -496,7 +524,9 @@ void line_follow_init(void)
   g7_count   = 0;      /* ★弯道计数（无条件复位，别放进 #if —— 上次编译事故就是这么来的） */
   g7_prev    = 0;
   g7_lock    = 0;
-  g7_waitmsg = 0;
+#if USE_G7_COUNT && USE_G7_TURN
+  g7_waitmsg = 0;      /* 只有开启硬转时才被读（关掉时不写，否则告警 set-but-never-used） */
+#endif
   g7_flag    = 0;
   g7_turn    = 0;
   cross_events  = 0;   /* ★十字事件计数（2026-09-22 15:31） */
