@@ -129,6 +129,80 @@ void line_sensor_init(void)
   dwt_init();          /* ★给突发过采样准备微秒基准（LINE_OS_ENABLE=0 时也备着，无害） */
 }
 
+/* ============================================================================
+ * ★★ 1kHz 红外采样（2026-09-23 晚）—— **只观测，不改变任何控制行为**
+ *
+ *  问题（用户实测观察）：葫芦圈出口那种图案**只持续一瞬间**，100Hz 的主循环
+ *    （10ms 一拍，1m/s 时一拍走 ~10mm）会把整拍跳过 → 车"看不见"出口。
+ *    他的原话证据：只有甩头时连续几拍压在那个图案上，才转出去过。
+ *
+ *  做法：**在 SysTick 里多采一次**（HAL 本来就是 1ms 一次 → 有效采样率 100Hz→1kHz）。
+ *    ★为什么不把控制拍改成 5ms/200Hz：所有拍数常量都是按 10ms 定的
+ *      （CROSS_REARM_FRAMES / GOURD_EXIT_TURN_FRAMES / LOST_MAX_CYCLES /
+ *       STRAIGHT_BOOST_DELAY / 丢线拍数…），控制拍一改全要翻倍，漏一个就是一个坑。
+ *      走 SysTick：控制拍和所有常量**一个都不用动**。
+ *
+ *  指标（遥测 K1= / MX=）：
+ *    total  = 本窗口 1kHz 采样次数
+ *    missed = 其中【与主循环最近一次读数不同】的次数 = "100Hz 漏掉的瞬间"数量
+ *    maxraw = 本窗口里 active 最多的那个图案（一闪而过的宽图案在这里能看到）
+ * ==========================================================================*/
+#if LINE_SAMPLE_1KHZ
+static volatile uint16_t os1k_total   = 0u;
+static volatile uint16_t os1k_missed  = 0u;
+static volatile uint16_t os1k_maxraw  = 0u;
+static volatile uint8_t  os1k_maxact  = 0u;
+static volatile uint16_t os1k_loopraw = 0xFFFFu;  /* 主循环最近一次读数（0xFFFF = 还没读过） */
+
+/* SysTick 里每 1ms 调用一次。★必须极快：约 1µs（8 次位带读 + 几次比较） */
+void line_sample_1khz(void)
+{
+  uint16_t bm  = line_raw_once();
+  uint8_t  act = 0u;
+  uint8_t  i;
+
+  if (os1k_total < 60000u) os1k_total++;
+  if ((bm != os1k_loopraw) && (os1k_missed < 60000u)) os1k_missed++;
+
+  for (i = 0u; i < LINE_CHANNELS; i++)
+  {
+    if (bm & (uint16_t)(1u << i)) act++;
+  }
+  if (act > os1k_maxact) { os1k_maxact = act; os1k_maxraw = bm; }
+}
+
+/* 主循环每次读数后调用：告诉 1kHz 层"主循环这次看到的是什么" */
+static void os1k_note_loop_raw(uint16_t bm) { os1k_loopraw = bm; }
+
+/* 取本窗口统计并清零（返回值 = missed；其余走指针，可传 NULL） */
+uint16_t line_1k_take(uint16_t* total, uint8_t* maxact, uint16_t* maxraw)
+{
+  uint16_t m, t, r;
+  uint8_t  a;
+  uint32_t pm = __get_PRIMASK();
+
+  __disable_irq();                 /* 读+清要原子，否则可能丢掉 SysTick 刚记的一次 */
+  m = os1k_missed; t = os1k_total; a = os1k_maxact; r = os1k_maxraw;
+  os1k_missed = 0u; os1k_total = 0u; os1k_maxact = 0u; os1k_maxraw = 0u;
+  if (!pm) __enable_irq();         /* ★恢复原状态：别把"本来关着中断"的调用者打开 */
+
+  if (total)  *total  = t;
+  if (maxact) *maxact = a;
+  if (maxraw) *maxraw = r;
+  return m;
+}
+#else
+/* 关掉时给空实现，保证遥测那边不用改 */
+void line_sample_1khz(void) { }
+uint16_t line_1k_take(uint16_t* total, uint8_t* maxact, uint16_t* maxraw)
+{
+  if (total)  *total  = 0u;
+  if (maxact) *maxact = 0u;
+  if (maxraw) *maxraw = 0u;
+  return 0u;
+}
+#endif /* LINE_SAMPLE_1KHZ */
+
 line_reading_t line_read(void)
 {
   line_reading_t r = {0, 0, 0};
@@ -153,6 +227,9 @@ line_reading_t line_read(void)
     }
   }
   r.raw = bm;
+#if LINE_SAMPLE_1KHZ
+  os1k_note_loop_raw(bm);   /* ★把"主循环看到的结果"告诉 1kHz 层，用于统计漏看量 */
+#endif
   return r;
 }
 

@@ -77,9 +77,20 @@ void telemetry_report(void)
     ir[i] = (r.raw >> i) & 1u ? '1' : '0';
   ir[LINE_CHANNELS] = '\0';
 
-  char buf[240];
+  /* ★1kHz 采样统计（本窗口，读一次清一次）—— 量化"100Hz 漏掉了多少瞬间"
+     K1 = missed/total（与主循环读数不同的 1kHz 样本 / 总样本）
+     MX = 本窗口出现过的最宽图案（路数/位图）—— 一闪而过的宽图案会在这里现形 */
+  uint16_t k1_total = 0u, k1_maxraw = 0u;
+  uint8_t  k1_maxact = 0u;
+  uint16_t k1_missed = line_1k_take(&k1_total, &k1_maxact, &k1_maxraw);
+  char mx[LINE_CHANNELS + 1];
+  for (uint8_t i = 0; i < LINE_CHANNELS; i++)
+    mx[i] = (k1_maxraw >> i) & 1u ? '1' : '0';
+  mx[LINE_CHANNELS] = '\0';
+
+  char buf[288];
   int n = snprintf(buf, sizeof(buf),
-    "FW:%s IR:%s RPM1=%d RPM2=%d KP=%d.%d SP=%d ST=%d DT=%d OD=%ld PATH=%ld ODE=%ld OS=%d GZ=%d GW=%d SB=%d G7=%d GX=%d GR=%d CX=%d BR=%d GE=%d GD=%d IG=%d EH=%d\r\n",
+    "FW:%s IR:%s RPM1=%d RPM2=%d KP=%d.%d SP=%d ST=%d DT=%d OD=%ld PATH=%ld ODE=%ld OS=%d GZ=%d GW=%d SB=%d G7=%d GX=%d GR=%d CX=%d BR=%d GE=%d GD=%d IG=%d EH=%d K1=%d/%d MX=%d/%s\r\n",
     FW_TAG, ir,
     speed_get_rpm(MOTOR_LEFT), speed_get_rpm(MOTOR_RIGHT),
     kp_x10 / 10, kp_x10 % 10,
@@ -107,8 +118,15 @@ void telemetry_report(void)
                                                应≈90; 小了=没转够, 大了=转过头
                                                (IMU 没通时恒为 0) */
     (int)line_follow_in_gourd(),            /* ★IG: 1=当前在葫芦圈里（此时丢线兜底被屏蔽） */
-    (int)line_follow_edge_hold_cnt());      /* ★EH: 最边两路"掉路容忍"补过几次（累计）
+    (int)line_follow_edge_hold_cnt(),       /* ★EH: 最边两路"掉路容忍"补过几次（累计）
                                                 涨得多 = 相切处最边传感器熄灭确实在发生 */
+    (int)k1_missed, (int)k1_total,          /* ★K1=missed/total：1kHz 采样里"与主循环读数
+                                                不同"的次数 / 总次数 = 100Hz 漏掉的瞬间占比。
+                                                占比高 = 图案变化比 100Hz 采样还快 —— 出口那种
+                                                "一闪而过"就是被这里量出来的 */
+    (int)k1_maxact, mx);                    /* ★MX=路数/位图：本窗口出现过的最宽图案。
+                                                若某次 MX 显示"6/00111111"而同一行的 IR: 从没
+                                                出现过它 → 说明 100Hz 确实漏掉了一个宽图案 */
   if (n > 0)
     HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)n, 100);
 }

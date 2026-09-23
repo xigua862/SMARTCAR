@@ -22,6 +22,8 @@
 #include "stm32f1xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "app_config.h"            /* LINE_SAMPLE_1KHZ 开关 */
+#include "drivers/line_sensor.h"   /* ★line_sample_1khz(): SysTick 里的 1kHz 红外采样 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -209,7 +211,12 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
-
+#if LINE_SAMPLE_1KHZ
+  /* ★1kHz 红外采样（2026-09-23 晚）：控制拍仍是 10ms，这里只是"多看几眼"，
+     用来量化"出口那种一闪而过的图案，100Hz 到底漏掉了多少"。
+     只读 GPIO + 记计数，不碰任何控制状态 → 不改变行为。约 1µs（= 0.1% CPU）。 */
+  line_sample_1khz();
+#endif
   /* USER CODE END SysTick_IRQn 1 */
 }
 

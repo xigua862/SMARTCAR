@@ -26,4 +26,12 @@ uint32_t line_os_disagree_take(void);
 /* ★过采样统计（累计, 不清零）：ticks=已过采样拍数, disagree=其中不一致的拍数 */
 void line_os_stats(uint32_t* ticks, uint32_t* disagree);
 
+/* ★1kHz 采样（2026-09-23 晚）：在 SysTick 里调用（只观测、不改变控制行为）。
+   目的：量化"出口那种只持续一瞬间的图案，100Hz 主循环漏掉了多少"。
+   见 app_config.h 的 LINE_SAMPLE_1KHZ。 */
+void line_sample_1khz(void);      /* ← SysTick_Handler 里每 1ms 调一次 */
+
+/* 取本窗口统计并清零。返回值 = missed（与主循环最近一次读数不同的 1kHz 样本数） */
+uint16_t line_1k_take(uint16_t* total, uint8_t* maxact, uint16_t* maxraw);
+
 #endif /* LINE_SENSOR_H */
