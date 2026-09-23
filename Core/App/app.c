@@ -2,6 +2,7 @@
 #include "drivers/motor.h"
 #include "drivers/line_sensor.h"
 #include "drivers/speed.h"
+#include "drivers/odom.h"        /* ★里程计: 量"跑了多少距离" */
 #include "drivers/imu.h"          /* USE_IMU 开关 */
 #include "drivers/led.h"
 #include "drivers/buzzer.h"
@@ -18,6 +19,12 @@ int16_t sp_straight = SPEED_STRAIGHT;
 int16_t sp_curve    = SPEED_CURVE;
 uint8_t test_mode   = 0;
 
+/* ★控制循环周期实测（2026-09-23 加）：遥测 DT= 字段
+   为什么要它：说明文档里怀疑"IMU 阻塞式 I2C 读会把主循环从 100Hz 拖到 20Hz 级"。
+   这里实测相邻两次控制拍的真实间隔(ms)，一眼就能看出主循环有没有被拖慢。
+   同时它也是"过采样有没有把一拍撑爆"的判据：DT 应该稳定在 10 附近。 */
+uint16_t loop_dt_ms = 0;
+
 static uint32_t t_ctl = 0;
 static uint32_t t_tel = 0;
 static uint32_t t_ui  = 0;
@@ -31,6 +38,7 @@ void app_init(void)
   key_init();                /* 启动键(PB9)消抖状态复位 */
   line_sensor_init();        /* 循迹(引脚由 CubeMX gpio.c 配置) */
   speed_init();              /* 测速: 编码器(USE_ENCODER) / 霍尔(退役) */
+  odom_init();               /* ★里程计复位(必须在 speed_init 之后: encoder 已启动) */
   imu_init();                /* MPU6050: 唤醒 + 器件自检 + 设置量程 */
   if (imu_is_present()) imu_calibrate();   /* 静止求陀螺零偏(开机一次, 约几十 ms) */
   car_fsm_init();            /* 状态机复位到 IDLE(待机等按键) */
@@ -51,6 +59,7 @@ void app_loop(void)
     key_update();
     buzzer_update();
     imu_update();            /* 读陀螺 Z 偏航率(给循迹用) */
+    odom_update();           /* ★里程累加(与 UI 同节拍 = 10ms, 60ms 内就能发现 16 位回绕) */
   }
 
   /* 控制节拍: 状态机驱动循迹(单电机测试时让位给 T 指令) */
@@ -58,7 +67,9 @@ void app_loop(void)
   {
     if (now - t_ctl >= CTRL_PERIOD_MS)
     {
+      uint32_t prev = t_ctl;
       t_ctl = now;
+      if (prev != 0u) loop_dt_ms = (uint16_t)(now - prev);   /* ★实测周期, 遥测 DT= */
       car_fsm_run((uint32_t)CTRL_PERIOD_MS);
     }
   }

@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
@@ -51,6 +52,7 @@
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
+void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -99,6 +101,35 @@ int main(void)
   app_init();        /* 应用框架初始化(电机/循迹/测速/IMU/FSM/遥测) */
 
   /* USER CODE END 2 */
+
+  /* ==========================================================================
+   * ★★★ FreeRTOS 调度器：已【停用】（2026-09-23）
+   *
+   *  ⚠️ 原来这里是 CubeMX 生成的：
+   *        osKernelInitialize();  MX_FREERTOS_Init();  osKernelStart();
+   *     但 osKernelStart() **永不返回**（FreeRTOS 规定：调度器一旦启动就接管 CPU，
+   *     只有堆不够、调度器启动失败时才会返回）。
+   *     → 它下面的 while(1){ app_loop(); } **永远执行不到**
+   *     → 循迹 / 测速 / 串口 全部不跑 = 车完全不动。
+   *     （而且 MX_FREERTOS_Init() 只建了一个空任务 StartDefaultTask，
+   *       里面就是 while(1){ osDelay(1); } —— 什么也没做。）
+   *
+   *  为什么【直接停用】而不是改成用 FreeRTOS：
+   *     · 这套代码是干净的"超循环 + 时间戳节拍"架构（app_loop 里按 HAL_GetTick 判断各节拍），
+   *       本来就不需要 RTOS；单任务跑它没有任何收益。
+   *     · 真要迁移，必须把 app_loop 拆成任务，并且给 I2C(MPU6050)/UART 加互斥保护
+   *       （两个任务同时用同一条 I2C 会互相踩），是一个完整的小工程。
+   *     · 当前阶段首要目标是【把车调稳跑通】，不是换调度框架。
+   *
+   *  ★文件保留不删：Middlewares/ 下的 FreeRTOS 和 Core/Src/freertos.c 都还在，
+   *    以后想真正迁移时可以直接用。要恢复调用：把下面三行取消注释，
+   *    并且【必须】把 app_loop() 搬进任务里（否则又是"车不动"）。
+   * ==========================================================================*/
+#if 0
+  osKernelInitialize();
+  MX_FREERTOS_Init();
+  osKernelStart();
+#endif
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */

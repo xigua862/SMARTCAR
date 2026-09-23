@@ -141,6 +141,25 @@ void UsageFault_Handler(void)
 /**
   * @brief This function handles System service call via SWI instruction.
   */
+/* ============================================================================
+ * ★★ SVC_Handler / PendSV_Handler：已【停用】（2026-09-23）
+ *
+ *  原因：CubeMX 在 21:00 重新生成时把 FreeRTOS 加进了工程，
+ *        它的 port.c 里【也定义了】这两个符号（vPortSVCHandler / xPortPendSVHandler
+ *        分别被 #define 成 SVC_Handler / PendSV_Handler）→ 链接期重复定义：
+ *            L6200E: Symbol SVC_Handler multiply defined (by port.o and stm32f1xx_it.o)
+ *
+ *  为什么用"停用这里"而不是"从工程里删 FreeRTOS 源文件"：
+ *        main.c 里已经停用了调度器（osKernelStart 永不返回，会挡住 app_loop），
+ *        所以这两个 FreeRTOS 版本的 handler **本来就不会被用到**（没事中断触发）。
+ *        但工程里 FreeRTOS 的 .c 还在编译，符号还在 → 必须让一边让位。
+ *        将来真要启用 FreeRTOS：把 main.c 的 #if 0 打开，并删掉这里的 #if 0 即可。
+ *
+ *  ★SysTick_Handler 不用动：它里面本来就有
+ *     `if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED) xPortSysTickHandler();`
+ *     调度器没启动时只走 HAL_IncTick()，正是我们要的。
+ * ==========================================================================*/
+#if 0
 void SVC_Handler(void)
 {
   /* USER CODE BEGIN SVCall_IRQn 0 */
@@ -150,6 +169,7 @@ void SVC_Handler(void)
 
   /* USER CODE END SVCall_IRQn 1 */
 }
+#endif
 
 /**
   * @brief This function handles Debug monitor.
@@ -167,6 +187,7 @@ void DebugMon_Handler(void)
 /**
   * @brief This function handles Pendable request for system service.
   */
+#if 0
 void PendSV_Handler(void)
 {
   /* USER CODE BEGIN PendSV_IRQn 0 */
@@ -176,6 +197,7 @@ void PendSV_Handler(void)
 
   /* USER CODE END PendSV_IRQn 1 */
 }
+#endif
 
 /**
   * @brief This function handles System tick timer.

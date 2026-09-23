@@ -6,6 +6,7 @@
 #include "drivers/line_sensor.h"
 #include "drivers/speed.h"
 #include "drivers/encoder.h"
+#include "drivers/odom.h"        /* ★里程计: 遥测 OD= / PATH= */
 #include "drivers/key.h"
 #include "drivers/buzzer.h"
 #include "drivers/led.h"
@@ -76,19 +77,38 @@ void telemetry_report(void)
     ir[i] = (r.raw >> i) & 1u ? '1' : '0';
   ir[LINE_CHANNELS] = '\0';
 
-  char buf[224];
+  char buf[240];
   int n = snprintf(buf, sizeof(buf),
-    "FW:%s IR:%s RPM1=%d RPM2=%d KP=%d.%d SP=%d ST=%d GZ=%d GW=%d SB=%d G7=%d GX=%d GR=%d CX=%d BR=%d\r\n",
+    "FW:%s IR:%s RPM1=%d RPM2=%d KP=%d.%d SP=%d ST=%d DT=%d OD=%ld PATH=%ld ODE=%ld OS=%d GZ=%d GW=%d SB=%d G7=%d GX=%d GR=%d CX=%d BR=%d GE=%d GD=%d IG=%d EH=%d\r\n",
     FW_TAG, ir,
     speed_get_rpm(MOTOR_LEFT), speed_get_rpm(MOTOR_RIGHT),
     kp_x10 / 10, kp_x10 % 10,
     sp_straight, (int)car_fsm_state(),
+    (int)loop_dt_ms,                  /* 实测控制周期(ms) */
+    (long)odom_distance_mm(),         /* ★OD: 净位移(mm), 从起步算起, 前进为正 —— 做"到点强制右转"就用它 */
+    (long)odom_path_mm(),             /* ★PATH: 累计路程(mm), 只加不减 */                  /* ★DT: 实测控制周期(ms)。应稳定在 10 附近;
+                                         明显 >10 = 主循环被拖慢(过采样过多 或 IMU 的 I2C 阻塞) */
+    (long)line_follow_gourd_odom_mm(),/* ★ODE: 从【进圈那一刻】起算的净位移(mm)。
+                                         标定 GOURD_EXIT_ODOM_MM 就抄这个数：
+                                         出圈事件行里也会打印一份。
+                                         不在圈里(IG=0)时恒为 0 —— 别拿它当里程表用 */
+    (int)line_os_disagree_take(),     /* ★OS: 本窗口内"同一拍子采样位图不一致"的拍数。
+                                         >0 = 快采样抓到了单次采样会漏掉的东西(过采样生效)
+                                         =0 = 这几个µs内红外没变(模块跟不上/间距太小) */
     (int)imu_get_gyro_z(), (int)line_follow_gourd_waves(), (int)line_follow_boost_active(),
     (int)line_follow_g7_count(),      /* ★最右一路(bit7)已触发次数 —— 用它定 G7_TURN_TRIG */
     (int)line_follow_g7_flag(),       /* 1 = 已触发过"出葫芦弯道" */
     (int)line_follow_turn_left(),     /* >0 = 正在强制右转（剩余拍数） */
     (int)line_follow_cross_events(),  /* ★判成十字的次数 —— 一趟应 = 赛道上的真十字数(2) */
-    (int)line_follow_branch_events());/* ★"只贴一端→拒绝当十字"的次数 = 被救回来的出口数 */
+    (int)line_follow_branch_events(), /* ★"只贴一端→拒绝当十字"的次数 = 被救回来的出口数 */
+    (int)line_follow_gourd_exit_events(), /* ★葫芦圈出口触发次数。正常=出圈次数;
+                                              在右直角弯处乱涨 = 该开闸门 GOURD_EXIT_GATE_WAVES=2 */
+    (int)line_follow_gourd_exit_last_deg(), /* ★上次出圈实际转了多少度 —— 标定用:
+                                               应≈90; 小了=没转够, 大了=转过头
+                                               (IMU 没通时恒为 0) */
+    (int)line_follow_in_gourd(),            /* ★IG: 1=当前在葫芦圈里（此时丢线兜底被屏蔽） */
+    (int)line_follow_edge_hold_cnt());      /* ★EH: 最边两路"掉路容忍"补过几次（累计）
+                                                涨得多 = 相切处最边传感器熄灭确实在发生 */
   if (n > 0)
     HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)n, 100);
 }
@@ -102,8 +122,9 @@ void telemetry_process_command(void)
   char  c = (char)(cmd_line[0] & 0xDF);   /* 首字母转大写 */
   float v = atof(cmd_line + 1);           /* 兼容 "P 15" 和 "P15" */
 
-  /* ★2026-09-22：白名单 —— 只认已知命令；噪声凑出来的字符串直接丢掉，不回话 */
-  if (strchr("PSDTMLBRVHX", c) == NULL) return;
+  /* ★2026-09-22：白名单 —— 只认已知命令；噪声凑出来的字符串直接丢掉，不回话
+     ★2026-09-23 加 O / Z：里程计读数与清零（手推标定葫芦圈出口里程用） */
+  if (strchr("PSDTMLBRVHXOZ", c) == NULL) return;
   char buf[112];
   int  n = 0;
 
@@ -142,6 +163,18 @@ void telemetry_process_command(void)
       ir, (int)r.error, (int)key_is_down(),
       (long)encoder_get_count(MOTOR_LEFT), (long)encoder_get_count(MOTOR_RIGHT),
       imu_who_am_i(), (int)imu_is_present(), (int)imu_get_gyro_z());
+  }
+  else if (c == 'O')                        /* ★O: 立刻打印里程（手推标定用，不改变状态） */
+  {
+    n = snprintf(buf, sizeof(buf),
+      "ODOM NOW: OD=%ldmm PATH=%ldmm L=%ld R=%ld\r\n",
+      (long)odom_distance_mm(), (long)odom_path_mm(),
+      (long)odom_left_mm(), (long)odom_right_mm());
+  }
+  else if (c == 'Z')                        /* ★Z: 里程清零（把当前位置当作 0 点） */
+  {
+    odom_reset();
+    n = snprintf(buf, sizeof(buf), "OK ODOM RESET (OD=0 PATH=0)\r\n");
   }
   else if (c == 'T')                        /* T <1|2> <速度>: 单电机测试(架空用) */
   {
@@ -221,7 +254,14 @@ void telemetry_process_command(void)
   else
   {
     n = snprintf(buf, sizeof(buf),
-      "CMD: P<KP> / S<SPD> / D<KD> / T<1|2><spd> / M<L><R> / L<0~7> / B[ms] / R(启动) / V(版本) / H(diag) / XX(emergency stop)\r\n");
+      /* ★2026-09-23：这段【必须纯 ASCII】。
+         原来里面写了中文（启动/版本），加上我新加的"读里程/里程清零"后
+         ARMCC 报 `#870-D: invalid multibyte character sequence` ——
+         它按 GBK 的双字节规则去扫这个字符串，而源文件是 UTF-8，
+         三字节中文被错配成非法双字节序列。
+         而且就算编过去，UTF-8 中文发到 GBK 串口终端上也是乱码。
+         ★以后往【字符串字面量】里加内容一律用英文；注释里中文没问题。 */
+      "CMD: P<KP> / S<SPD> / D<KD> / T<1|2> <spd> / M<L> <R> / L<0~7> / B[ms] / R(start) / V(version) / H(diag) / O(read odom) / Z(reset odom) / XX(emergency stop)\r\n");
   }
   if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)n, 100);
 }
