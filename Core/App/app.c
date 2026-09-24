@@ -18,6 +18,7 @@ int16_t base_speed  = BASE_SPEED;
 int16_t sp_straight = SPEED_STRAIGHT;
 int16_t sp_curve    = SPEED_CURVE;
 uint8_t test_mode   = 0;
+uint16_t test_run_ms = 0u;   /* ★`TEST <秒>` 的剩余毫秒（>0 = 测试态独占主循环） */
 
 /* ★控制循环周期实测（2026-09-23 加）：遥测 DT= 字段
    为什么要它：说明文档里怀疑"IMU 阻塞式 I2C 读会把主循环从 100Hz 拖到 20Hz 级"。
@@ -60,6 +61,31 @@ void app_loop(void)
     buzzer_update();
     imu_update();            /* 读陀螺 Z 偏航率(给循迹用) */
     odom_update();           /* ★里程累加(与 UI 同节拍 = 10ms, 60ms 内就能发现 16 位回绕) */
+  }
+
+  /* ★测试态（他要求）：`TEST <秒>` → 只循迹 n 秒 → 自动停车 + 回放这 n 秒的 100Hz 轨迹。
+     用途：把车放在葫芦入口前跑 1 秒，用【实测数据】定"入口标志"。 */
+  if (test_run_ms > 0u)
+  {
+    if (now - t_ctl >= CTRL_PERIOD_MS)
+    {
+      t_ctl = now;
+      speed_update();
+      telemetry_trace_tick();
+      line_follow_control(base_speed);
+      if (test_run_ms > (uint16_t)CTRL_PERIOD_MS)
+      {
+        test_run_ms = (uint16_t)(test_run_ms - CTRL_PERIOD_MS);
+      }
+      else
+      {
+        test_run_ms = 0u;
+        motor_stop();
+        test_mode = 0;
+        telemetry_trace_dump();        /* 回放这段轨迹 */
+      }
+    }
+    return;                            /* 测试态独占主循环这一圈 */
   }
 
   /* 控制节拍：测速 + 状态机驱动循迹（单电机测试时，状态机让位给 T/M 指令） */

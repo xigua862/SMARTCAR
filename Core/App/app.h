@@ -10,6 +10,7 @@ extern int16_t base_speed;  /* 基础速度 0~99（关掉自适应时用它） *
 extern int16_t sp_straight; /* 自适应: 直道目标速度（S 指令同步改这个） */
 extern int16_t sp_curve;    /* 自适应: 弯道目标速度（= 直道 × CURVE_SPEED_RATIO） */
 extern uint8_t test_mode;   /* 1=单电机测试(暂停循迹与状态机) */
+extern uint16_t test_run_ms;/* >0 = `TEST <秒>` 测试态剩余毫秒（独占主循环） */
 extern uint16_t loop_dt_ms; /* ★实测控制周期(ms), 遥测 DT=。应为 10 附近;
                                被拖到 20+ 说明主循环里有阻塞(例如 IMU 的 I2C 读超时) */
 

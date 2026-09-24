@@ -87,6 +87,12 @@ void telemetry_trace_tick(void)
   if (s_tr_n < (uint16_t)TRACE_N) s_tr_n++;
 }
 
+void telemetry_trace_reset(void)
+{
+  s_tr_i = 0u;
+  s_tr_n = 0u;
+}
+
 void telemetry_trace_dump(void)
 {
   char b[64];
@@ -205,6 +211,32 @@ void telemetry_process_command(void)
 
   /* ★2026-09-22：白名单 —— 只认已知命令；噪声凑出来的字符串直接丢掉，不回话
      ★2026-09-23 加 O / Z：里程计读数与清零（手推标定葫芦圈出口里程用） */
+  /* ★2026-09-24 新增【测试态】`TEST <秒>`（他要求）：
+     把车放在葫芦入口前 → 发 `TEST 1` → 车只循迹 1 秒 → **自动回放这 1 秒的 100Hz 轨迹**。
+     用途：**用实测数据来定"葫芦入口的标志"**（他明说"我自己说的不准"）。
+     ⚠️ 只在待机/到站时允许（不劫持正在跑的正式一趟）。 */
+  if ((cmd_line[0] == 'T') && (cmd_line[1] == 'E'))
+  {
+    int sec = atoi(cmd_line + 4);
+    if (sec < 1) sec = 1;
+    if (sec > 5) sec = 5;
+    {
+      car_state_t st = car_fsm_state();
+      if (st == CAR_IDLE || st == CAR_STOPPED)
+      {
+        test_mode = 1;                        /* 让状态机让位, 由 app_loop 的测试态驱动 */
+        telemetry_trace_reset();              /* 轨迹清零 → 回放就只有这 n 秒 */
+        test_run_ms = (uint16_t)(sec * 1000);
+        HAL_UART_Transmit(&huart1, (uint8_t*)"OK TEST run\r\n", 14, 100);
+      }
+      else
+      {
+        HAL_UART_Transmit(&huart1, (uint8_t*)"TEST only in IDLE/STOPPED\r\n", 27, 100);
+      }
+    }
+    return;
+  }
+
   if (strchr("PSDTMLBRVHXOZQ", c) == NULL) return;
   char buf[112];
   int  n = 0;
