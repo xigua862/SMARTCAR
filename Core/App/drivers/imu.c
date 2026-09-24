@@ -175,7 +175,28 @@ void imu_init(void)
   calibrated = 0;
   pitch = 0.0f; roll = 0.0f;
   gz_dps = 0.0f;
-  present = (imu_who_am_i() == 0x68) ? 1u : 0u;
+  /* ★★★ 2026-09-24 修 present：WHO_AM_I 只读一次，读挂了就永远是 0 ★★★
+     实车证据（交接文档第三节）：遥测出现 `WHO=70 / IMU=0` —— WHO_AM_I 读到 0x70
+     而不是 0x68 → present=0 → app_init 里 `if (imu_is_present()) imu_calibrate();`
+     被跳过 → **陀螺零偏没标定** → GZ 带直流偏置 →
+     相切点判据的"GZ ±8 拍内翻号"被这点偏移+噪声满足 → 圈外误报。
+     两道修：① 重试 3 次（I2C 偶发失败很常见）；② 仍失败就用"原始数据能不能读回来"兜底。
+     ★为什么兜底可信：imu_read_raw() 失败时会【提前 return】、全局量保持不动，
+       而静止时 az 必然含着重力分量 ≠ 0 → 只要读到一个非 0 值就说明 I2C 通了。 */
+  {
+    uint8_t ok = 0u;
+    for (uint8_t k = 0u; k < 3u; k++)
+    {
+      if (imu_who_am_i() == 0x68u) { ok = 1u; break; }
+      HAL_Delay(5);
+    }
+    if (!ok)
+    {
+      imu_read_raw();                      /* 失败会提前返回，全局量不变 */
+      if ((ax != 0) || (ay != 0) || (az != 0) || (gz != 0)) ok = 1u;
+    }
+    present = ok;
+  }
 }
 
 /* 三轴陀螺零偏: 静止采样 100 次取平均(开机时调用一次) */

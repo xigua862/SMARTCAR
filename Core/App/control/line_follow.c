@@ -52,6 +52,13 @@ static uint8_t  boost_active    = 0;   /* 1 = 已进入提速档（accessor 会�
 /* ★葫芦弯相切点状态机（2026-09-22 他提的方案） */
 static uint8_t  gourd_latch  = 0;      /* 分离锁存：一段分离只记 1 次 */
 static uint8_t  gourd_waves  = 0;      /* 已识别的相切点个数（到 3 清零 = 绕完一圈） */
+#if USE_GOURD_SM
+/* ★★★ 2026-09-24 新增：出圈触发事件（队友方案第 3 步）★★★
+   GW 归 0（= 第 3 个相切点）时置 1，被出圈触发块消费后清 0。
+   ★为什么用独立事件位、而不是直接判 `gourd_waves == 0`：
+     发车时 GW 本来就是 0 —— 直接判的话车一启动就会立刻右转。 */
+static uint8_t  gourd_wrap_evt = 0;
+#endif
 /* ★2026-09-24 相切点新判据(三条)的状态：GZ 符号 / 翻号窗口 / 候选窗口+候选是否通过 */
 static int8_t   gz_sign   = 0;
 static uint8_t  flip_win  = 0;
@@ -311,8 +318,22 @@ void line_follow_control(int16_t base)
             gourd_dir   = (last_error >= 0) ? 1 : -1;
             gourd_flip  = GOURD_FLIP_CYCLES;
 #endif
-            if (gourd_waves < 200u) gourd_waves++;
-            if (gourd_waves >= GOURD_TOTAL) gourd_waves = 0;   /* 3 个相切点 = 绕完 4 个圆 */
+            /* ★★★ 2026-09-24 只统计【圈内】的相切点（队友方案第 2 步）★★★
+               为什么必须加这道门：直角弯在【圈外】也会满足这三条判据
+               （实测误报过 1 次，且不稳定）—— 不管它的话 GW 会被圈外误报推着走。
+               配合"IG=0 强制清零 GW"（见本函数后面的 IG 块）：
+                 圈外误报 -> 进门即清，绕完一圈回到 0 也清 -> 不依赖"误报是否稳定"。
+               ★这里用的 ge_in_gourd 是【上一拍】的值（IG 块在本函数后面才更新），
+                 差 1 拍 = 10ms，相对一圈几秒可忽略。 */
+            if (ge_in_gourd && (gourd_waves < 200u))
+            {
+              gourd_waves++;
+              if (gourd_waves >= GOURD_TOTAL)
+              {
+                gourd_waves    = 0;   /* 归 0 = 第 3 个相切点 = 绕完 4 个圆 */
+                gourd_wrap_evt = 1u;  /* ★置出圈事件（由出圈触发块消费） */
+              }
+            }
           }
         }
       }
@@ -728,6 +749,19 @@ void line_follow_control(int16_t base)
       }
     }
   }
+
+  /* ★★★ 2026-09-24 IG=0 → 强制清零相切点计数（队友方案第 2 步的后半）★★★
+     为什么：直角弯在圈外也会满足相切点三条判据（实测误报过，且不稳定）。
+     "GW 只在 IG=1 时累计"挡住进门，"IG=0 强制清零"负责出门即清 ——
+     两道一起，圈外误报无论稳不稳定都翻不出浪。
+     ★放在 IG 块的末尾：这一拍的 ge_in_gourd 已经算完，用的是最新值。 */
+#if USE_GOURD_SM
+  if (!ge_in_gourd)
+  {
+    gourd_waves    = 0u;
+    gourd_wrap_evt = 0u;   /* 圈外不许留下"该出圈"的事件 */
+  }
+#endif
 #endif /* USE_GOURD_EXIT || USE_GOURD_LOST_GUARD */
 
   /* ★★★ 葫芦圈【后半段减速】（2026-09-23）
@@ -887,6 +921,19 @@ void line_follow_control(int16_t base)
       }
 #endif
 
+#if USE_GOURD_SM
+      /* ---- 判据④：相切点计数归 0（= 第 3 个相切点）= 出圈 ★2026-09-24 队友方案第 3 步★
+         GW 只在 IG=1 时累计、IG=0 时强制清零（见相切点检测那一段和 IG 块末尾）——
+         所以圈外（直角弯）的误报"进门不许计、出门即清"，不依赖"误报是否稳定"。
+         第 3 个相切点一到，GW 归 0 → 这一个事件就是出口。
+         ★不直接用 `gourd_waves == 0` 判：发车时它本来就是 0，会一起步就右转。 */
+      if ((trig_now == 0u) && gourd_wrap_evt)
+      {
+        trig_now       = 4u;
+        gourd_wrap_evt = 0u;          /* 事件消费掉，一次只转一次 */
+      }
+#endif
+
     }
 
     /* ---- 起转 ---- */
@@ -910,13 +957,16 @@ void line_follow_control(int16_t base)
       {
         char ev[128];
         (void)snprintf(ev, sizeof(ev),
-          "GOURD-EXIT: trig=%u -> turn RIGHT   ODE=%ldmm  (%s)",
+          "GOURD-EXIT: trig=%u -> turn RIGHT   ODE=%ldmm  yaw=%u GW=%u  (%s)",
           (unsigned)trig_now,
           (long)(odom_distance_mm() - ge_odom_entry),
-          (trig_now == 3u) ? "by MILEAGE"
+          (unsigned)yaw_ok,
+          (unsigned)gourd_waves,
+          (trig_now == 4u) ? "by TANGENT-COUNT (GW wrapped to 0)"
+                           : ((trig_now == 3u) ? "by MILEAGE"
                            : ((trig_now == 2u) ? "in-gourd + lost line"
                                                : (yaw_ok ? "left2 lit, yaw closed loop"
-                                                         : "left2 lit, dist fallback")));
+                                                         : "left2 lit, dist fallback"))));
         telemetry_msg(ev);
       }
     }
@@ -1329,6 +1379,9 @@ void line_follow_init(void)
   boost_active = 0;
   gourd_latch  = 0;
   gourd_waves  = 0;
+#if USE_GOURD_SM
+  gourd_wrap_evt = 0;   /* ★出圈事件（跟 gourd_waves 同一个开关，声明/复位/使用同进同出） */
+#endif
 #if GOURD_USE_FLIP
   gourd_flip   = 0;
   gourd_dir    = 1;
