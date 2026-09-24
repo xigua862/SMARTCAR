@@ -48,6 +48,19 @@ static void enter(car_state_t s)
   t_state = HAL_GetTick();
   emg_hold = 0;
 
+  /* ★★★ 2026-09-24 晚 新增：状态切换时丢弃【积压的】按键事件 ★★★
+     为什么必须要有（真实的坑，不是理论问题）：
+       急停里按住 2 秒解除 → enter(CAR_IDLE)。
+       但这次长按产生的 long_evt **没有任何人取走**。
+       而"长短按换过来"之后，待机状态的出发键【正是长按】——
+       下一拍回到 `case CAR_IDLE`，`key_take_long()` 立刻读到这个残留事件
+       → enter(CAR_COUNTDOWN) → **小车自己就跑起来了**。
+     ★这和 4400 那一版踩的是同一个坑；换成长按出发后这个坑必然出现。
+     在 enter() 里统一清一次，就彻底断掉"残留事件穿越状态"这一类问题。
+     ★时序上安全：清空发生在"进入新状态的那一刻"，
+       用户之后按下的按键仍然会被正常捕获。 */
+  key_clear_events();
+
   switch (s)
   {
   case CAR_IDLE:
@@ -154,13 +167,38 @@ void car_fsm_run(uint32_t dt_ms)
 #if !AUTO_START_ENABLE
   else
   {
-    /* 长按按键 = 急停（调车保险；比赛禁止碰车，所以只作兜底）
-       ★临时停用：老核心板 PB9 坏 → 按键不可用。新板子到了把 app_config 的
-         AUTO_START_ENABLE 改回 0，这段自动恢复 */
-    if (key_take_long())
+    /* ★★★ 2026-09-24 晚 用户要求：**长短按换一下** = 长按出发、短按暂停 ★★★
+       （原来是"短按出发、长按急停"）
+
+       为什么这么换不会打架：key.c 里长/短按是【天然互斥】的 ——
+         长按会把 long_fired 置 1，松开时 `else if (!long_fired)` 不成立
+         → 不会再补一个短按事件。所以一次按键只会产生一个事件。
+
+       按键含义按状态分（在下面 switch 之前统一处理）：
+         · 运行中 / 读秒中：**短按 = 暂停**（急停）
+                            长按【也算暂停】—— 否则"按久了一点反应都没有"，
+                            而且长按事件会残留在队列里，
+                            等到回待机时被当成"出发"→ 小车自己跑起来。
+         · 待机 / 到站    ：**短按【不做任何动作】**（只把事件吃掉）
+                            —— 这两个状态没有"暂停"可言；而且摆放小车时
+                            误碰一下就进急停、还要按住 2 秒才能解除，太折腾。
+                            **长按不在这里消费** —— 留给下面的状态分支做"出发"。
+
+       ⚠️ 两个 take 必须分开调用、不能写成 `a() || b()`：
+          短路求值会让后一个【不被调用】→ 事件残留在队列里。 */
+    if (state == CAR_RUN || state == CAR_COUNTDOWN)
     {
-      car_fsm_emergency_stop_cause(1u);
-      return;
+      uint8_t k_short = key_take_press();
+      uint8_t k_long  = key_take_long();
+      if (k_short || k_long)
+      {
+        car_fsm_emergency_stop_cause(1u);
+        return;
+      }
+    }
+    else
+    {
+      (void)key_take_press();     /* 待机/到站：短按吃掉、不动作 */
     }
   }
 #endif
@@ -172,7 +210,10 @@ void car_fsm_run(uint32_t dt_ms)
 #if AUTO_START_ENABLE
     enter(CAR_COUNTDOWN);
 #else
-    if (key_take_press()) enter(CAR_COUNTDOWN);      /* 按键 → 开始读秒 */
+    /* ★2026-09-24 晚 用户要求"长短按换一下"：**长按 = 出发**（原来是短按）。
+       短按在待机时已经被上面吃掉了（不动作）。 */
+    /* if (key_take_press()) enter(CAR_COUNTDOWN); */   /* 旧行为：短按出发 —— 已停用 */
+    if (key_take_long()) enter(CAR_COUNTDOWN);           /* 新行为：长按出发 */
 #endif
     break;
 
@@ -218,7 +259,10 @@ void car_fsm_run(uint32_t dt_ms)
   case CAR_STOPPED:
     motor_stop();
     led_mask((uint8_t)(((now / 250u) & 1u) ? 0x7u : 0x0u));   /* 三灯 2Hz 闪 */
-    if (key_take_press()) enter(CAR_COUNTDOWN);               /* 到站后可按键再跑一次 */
+    /* ★2026-09-24 晚 用户要求"长短按换一下"：**长按 = 再跑一次**（原来是短按）。
+       短按在到站时已经被上面吃掉了（不动作）。 */
+    if (key_take_long()) enter(CAR_COUNTDOWN);                /* 长按再跑一次 */
+    /* if (key_take_press()) enter(CAR_COUNTDOWN); */          /* 旧行为：短按再跑 —— 已停用 */
     break;
 
   case CAR_EMERGENCY:
