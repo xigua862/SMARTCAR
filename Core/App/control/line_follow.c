@@ -60,6 +60,10 @@ static uint16_t s_1k_missed = 0;
 /* ★2026-09-24 晚：IG=0 的"离开确认"计数（GW 清零用）。
    见 IG 块末尾的说明 —— 实车日志证明 IG 会乱跳，立刻清零会把 GW 抹掉。 */
 static uint16_t s_ig_leave = 0;
+/* ★2026-09-24 晚：上一个相切点被记下时的里程读数。
+   用来做"两个相切点之间至少要隔 GOURD_WAVE_MIN_MM 毫米"的门槛 ——
+   实车日志里误报是成簇的（两个"相切点"只隔 47mm），会把 GW 提前推满。 */
+static int32_t  s_wave_odom = 0;
 static uint16_t s_1k_total  = 0;
 static uint8_t  s_1k_maxact = 0;
 static uint16_t s_1k_maxraw = 0;
@@ -362,6 +366,15 @@ void line_follow_control(int16_t base)
                  差 1 拍 = 10ms，相对一圈几秒可忽略。 */
             if (ge_in_gourd && (gourd_waves < 200u))
             {
+              /* ★★★ 2026-09-24 晚：相切点必须【彼此隔开】才算数（实车日志驱动）★★★
+                 日志证据：OD=864 记 GW=1、OD=913 记 GW=2 —— 只隔 47mm！
+                 47mm 不可能是两个真相切点（葫芦圈那几个圆是几百毫米量级）
+                 ⇒ 误报是成簇的：一次真实宽图案被判成 2~3 个相切点 →
+                   GW 提前凑满 3 → 归 0 → 右转提前触发 →
+                   车在没有出口线的位置拐 85°，转完就是 IR 全灭。
+                 修法：距上一个相切点不足 GOURD_WAVE_MIN_MM 毫米 → 不计数。 */
+              if ((odom_distance_mm() - s_wave_odom) >= (int32_t)GOURD_WAVE_MIN_MM)
+              {
 #if GOURD_USE_FLIP
               /* ★★★ 2026-09-24 翻转修正【也必须在这道门里】★★★
                  实车病根：车进了葫芦圈就【锁在第 1 个圆上绕两圈】——
@@ -374,11 +387,13 @@ void line_follow_control(int16_t base)
               gourd_dir  = (last_error >= 0) ? 1 : -1;   /* 进相切点前的误差方向 */
               gourd_flip = GOURD_FLIP_CYCLES;            /* 反向修正保持的拍数 */
 #endif
-              gourd_waves++;
-              if (gourd_waves >= GOURD_TOTAL)
-              {
-                gourd_waves    = 0;   /* 归 0 = 第 3 个相切点 = 绕完 4 个圆 */
-                gourd_wrap_evt = 1u;  /* ★置出圈事件（由出圈触发块消费） */
+                s_wave_odom = odom_distance_mm();        /* 记下本次相切点的位置 */
+                gourd_waves++;
+                if (gourd_waves >= GOURD_TOTAL)
+                {
+                  gourd_waves    = 0;   /* 归 0 = 第 3 个相切点 = 绕完 4 个圆 */
+                  gourd_wrap_evt = 1u;  /* ★置出圈事件（由出圈触发块消费） */
+                }
               }
             }
           }
@@ -824,6 +839,9 @@ void line_follow_control(int16_t base)
   {
     gourd_waves    = 0u;                   /* 确认离开了 → 才清 GW */
     gourd_wrap_evt = 0u;
+    s_wave_odom    = odom_distance_mm();   /* ★同时把"上一个相切点位置"对齐到现在 ——
+                                              这样下一圈的第一个相切点不会被上一圈的
+                                              位置门槛误挡掉 */
   }
 #endif
 #endif /* USE_GOURD_EXIT || USE_GOURD_LOST_GUARD */
@@ -1502,6 +1520,7 @@ void line_follow_init(void)
 #if USE_GOURD_SM
   gourd_wrap_evt = 0;   /* ★出圈事件（跟 gourd_waves 同一个开关，声明/复位/使用同进同出） */
   s_ig_leave     = 0;   /* ★"离开确认"计数（IG=0 连续多少拍才清 GW） */
+  s_wave_odom    = odom_distance_mm();   /* ★上一个相切点位置（最小间距门槛用） */
 #endif
 #if GOURD_USE_FLIP
   gourd_flip   = 0;
