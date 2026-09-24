@@ -49,6 +49,18 @@ static uint16_t straight_cycles = 0;   /* 连续"直线"拍数 */
 #endif
 static uint8_t  boost_active    = 0;   /* 1 = 已进入提速档（accessor 会读, 所以不受开关影响） */
 
+/* ★2026-09-24 晚：本窗口的 1kHz 采样统计（遥测 K1= / MX=）。
+   ★为什么放在这里而不是让遥测直接调 line_1k_take：
+     line_1k_take 会【清零】窗口统计（missed/total/maxact/maxraw 全清），
+     相切点识别那边已经取走了 maxact/maxraw —— 如果遥测再取一次，
+     两边就各拿到半个窗口，谁都看不全（而且相切点识别是 100Hz、遥测只有 20Hz，
+     晚取的那一方几乎总是拿到空窗口）。
+     所以统一"由相切点识别处取走、缓存到这里"，遥测读缓存。 */
+static uint16_t s_1k_missed = 0;
+static uint16_t s_1k_total  = 0;
+static uint8_t  s_1k_maxact = 0;
+static uint16_t s_1k_maxraw = 0;
+
 /* ★葫芦弯相切点状态机（2026-09-22 他提的方案） */
 static uint8_t  gourd_latch  = 0;      /* 分离锁存：一段分离只记 1 次 */
 static uint8_t  gourd_waves  = 0;      /* 已识别的相切点个数（到 3 清零 = 绕完一圈） */
@@ -280,23 +292,47 @@ void line_follow_control(int16_t base)
      规则：最左活跃 L 与最右活跃 R 之间空 >=2 路 → 判"分离"；分离期间只记 1 次（锁存）。*/
 #if USE_GOURD_SM
   {
-    uint8_t L = 0xFFu, R = 0u, cnt = 0u;
-    for (uint8_t i = 0; i < LINE_CHANNELS; i++)
-    {
-      if (r.raw & (uint16_t)(1u << i)) { if (L == 0xFFu) L = i; R = i; cnt++; }
-    }
+    /* ★★★ 2026-09-24 晚：相切点识别改用【1kHz 过采样】的位图（用户方案）★★★
+       用户实测观察："小车在过葫芦圈里的弯道的时候转速特别大，
+                     实际上的识别窗口就变小了" —— 完全正确：
+       车转得快，"宽 + 只贴一端"这个图案可能只存在 1~3ms，
+       而相切点判据原来只看 100Hz 那一拍（每 10ms 才采一次）→ 直接漏掉 →
+       相切点识别不到 → 翻转修正不触发 → 车就锁在同一个圆上绕圈。
+       ★本工程早就有 1kHz 采样器（SysTick 里 line_sample_1khz）：
+         os1k_maxact / os1k_maxraw = 【本窗口内亮路数最多的那一帧的完整位图】。
+         现在把它取出来，和当前拍的位图【取或】—— 哪个满足判据就算命中。
+       ★为什么在这里取（而不是留给遥测）：line_1k_take 会【清零】窗口，
+         两边各取一次就把窗口切成两半、谁也看不全。
+         所以统一由这里取走，遥测的 K1 改读 line_follow_1k_missed()。 */
+    uint16_t bm1k   = 0u;
+    uint8_t  act1k  = 0u;
+    s_1k_missed = line_1k_take(&s_1k_total, &act1k, &bm1k);
+    s_1k_maxact = act1k;
+    s_1k_maxraw = bm1k;
+
     /* ★2026-09-24 相切点判据【实测定稿·三条】(数据: _tmp/test2.txt 葫芦 vs 直角弯)
        ① 宽图案(>=CROSS_ACTIVE_MIN 路) 且【只贴一端】—— 直角弯也会命中, 单靠它不够
        ② GZ 在 ±8 拍内【翻号】—— 葫芦实测 -192→+200 (8 拍内)；直角弯宽图案时同号
        ③ 事件后 6 拍内【不出现全灭】—— 直角弯必全灭(~330ms)，相切点一直有线
-       实现：①成立先挂"候选"(6 拍), 期内验收 ②③, 出现全灭立即作废。 */
+       实现：①成立先挂"候选"(6 拍), 期内验收 ②③, 出现全灭立即作废。
+       ★① 改成对【当前拍】和【1kHz 窗口最宽那帧】各算一次，任一命中即算成立。 */
     {
       uint8_t wide_one = 0u;
-      if ((L != 0xFFu) && (cnt >= (uint8_t)CROSS_ACTIVE_MIN))
+      for (uint8_t pass = 0u; (pass < 2u) && (wide_one == 0u); pass++)
       {
-        uint8_t tL = (L == 0u)                   ? 1u : 0u;
-        uint8_t tR = (R == (LINE_CHANNELS - 1u)) ? 1u : 0u;
-        wide_one = (tL != tR) ? 1u : 0u;          /* 只贴一端 = 分支口/相切点 */
+        uint16_t bm = (pass == 0u) ? r.raw : bm1k;
+        uint8_t L = 0xFFu, R = 0u, cnt = 0u;
+        if (bm == 0u) continue;                     /* 1kHz 那帧本来就没有 → 跳过 */
+        for (uint8_t i = 0; i < LINE_CHANNELS; i++)
+        {
+          if (bm & (uint16_t)(1u << i)) { if (L == 0xFFu) L = i; R = i; cnt++; }
+        }
+        if ((L != 0xFFu) && (cnt >= (uint8_t)CROSS_ACTIVE_MIN))
+        {
+          uint8_t tL = (L == 0u)                   ? 1u : 0u;
+          uint8_t tR = (R == (LINE_CHANNELS - 1u)) ? 1u : 0u;
+          wide_one = (tL != tR) ? 1u : 0u;          /* 只贴一端 = 分支口/相切点 */
+        }
       }
       {
         int8_t s = (imu_get_gyro_z() >= 0.0f) ? 1 : -1;
@@ -1258,6 +1294,25 @@ uint8_t line_follow_on_cross(void)
 uint8_t line_follow_gourd_waves(void)
 {
   return gourd_waves;
+}
+
+/* ★本窗口里"100Hz 漏看了几拍 1kHz 采样"（遥测 K1=）。
+     >0 就说明有东西一闪而过 —— 现在这个数据不只是观测，
+     它背后的 maxraw 位图已经真的参与相切点识别了。
+     ★由 line_follow_control 里的相切点识别处填充（那里调 line_1k_take 取走窗口）。 */
+uint16_t line_follow_1k_missed(void)
+{
+  return s_1k_missed;
+}
+
+/* ★本窗口 1kHz 采样的完整统计（遥测 K1=missed/total 与 MX=maxact/maxraw）。
+     传 NULL 就不取那一项。★必须在 line_follow_control 之后读（它负责填充）。 */
+void line_follow_1k_stats(uint16_t* missed, uint16_t* total, uint8_t* maxact, uint16_t* maxraw)
+{
+  if (missed) *missed = s_1k_missed;
+  if (total)  *total  = s_1k_total;
+  if (maxact) *maxact = s_1k_maxact;
+  if (maxraw) *maxraw = s_1k_maxraw;
 }
 
 uint8_t line_follow_boost_active(void)

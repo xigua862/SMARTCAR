@@ -122,7 +122,11 @@ void telemetry_report(void)
     ir[i] = (r.raw >> i) & 1u ? '1' : '0';
   ir[LINE_CHANNELS] = '\0';
 
-  uint16_t k1m = line_1k_take(NULL, NULL, NULL);   /* 只留"100Hz 漏看数"当信号灯 */
+  /* ★2026-09-24 晚：改读 line_follow 的缓存，不再直接 line_1k_take ——
+     那个会清零窗口，而相切点识别（100Hz）已经取走了 maxact/maxraw，
+     遥测只有 20Hz，直接取几乎总是拿到空窗口。 */
+  uint16_t k1m = 0u;
+  line_follow_1k_stats(&k1m, NULL, NULL, NULL);   /* 只留"100Hz 漏看数"当信号灯 */
 
   char buf[112];
   int n = snprintf(buf, sizeof(buf),
@@ -155,12 +159,15 @@ void telemetry_print_full(void)
     ir[i] = (r.raw >> i) & 1u ? '1' : '0';
   ir[LINE_CHANNELS] = '\0';
 
-  /* ★1kHz 采样统计（本窗口，读一次清一次）—— 量化"100Hz 漏掉了多少瞬间"
+  /* ★1kHz 采样统计（本窗口）—— 量化"100Hz 漏掉了多少瞬间"
      K1 = missed/total（与主循环读数不同的 1kHz 样本 / 总样本）
-     MX = 本窗口出现过的最宽图案（路数/位图）—— 一闪而过的宽图案会在这里现形 */
+     MX = 本窗口出现过的最宽图案（路数/位图）—— 一闪而过的宽图案会在这里现形
+     ★2026-09-24 晚：改读 line_follow 的缓存，不再直接 line_1k_take
+       （那个会清零窗口，而相切点识别 100Hz 已经取走了 maxact/maxraw）。 */
   uint16_t k1_total = 0u, k1_maxraw = 0u;
   uint8_t  k1_maxact = 0u;
-  uint16_t k1_missed = line_1k_take(&k1_total, &k1_maxact, &k1_maxraw);
+  uint16_t k1_missed = 0u;
+  line_follow_1k_stats(&k1_missed, &k1_total, &k1_maxact, &k1_maxraw);
   char mx[LINE_CHANNELS + 1];
   for (uint8_t i = 0; i < LINE_CHANNELS; i++)
     mx[i] = (k1_maxraw >> i) & 1u ? '1' : '0';

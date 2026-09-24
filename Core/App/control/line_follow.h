@@ -14,6 +14,11 @@ uint8_t line_follow_is_lost(void);    /* 1 = 持续丢线(正在原地找线) */
 uint8_t line_follow_on_cross(void);   /* 1 = 当前判定为十字(强制直行中) */
 
 uint8_t line_follow_gourd_waves(void);   /* 葫芦弯已识别的相切点个数(0~2, 到3清零) */
+uint16_t line_follow_1k_missed(void);    /* ★本窗口 100Hz 漏看了几拍 1kHz 采样(遥测 K1=) */
+/* ★本窗口 1kHz 采样的完整统计（遥测 K1=missed/total 与 MX=maxact/maxraw）。
+   ★必须读这个、不要再直接调 line_1k_take —— 那个会清零窗口，
+     相切点识别已经取走了 maxact/maxraw，两边各取一次谁都看不全。 */
+void line_follow_1k_stats(uint16_t* missed, uint16_t* total, uint8_t* maxact, uint16_t* maxraw);
 uint8_t line_follow_boost_active(void);  /* 1 = 直线提速档生效中 */
 
 /* ★弯道计数 → 强制右转（2026-09-22 他提的方案） */
