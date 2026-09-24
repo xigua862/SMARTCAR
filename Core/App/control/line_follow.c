@@ -314,10 +314,6 @@ void line_follow_control(int16_t base)
           if ((cand_win == 0u) && cand_ok && !gourd_latch)
           {
             gourd_latch = 1u;                      /* 一个相切点只记一次 */
-#if GOURD_USE_FLIP
-            gourd_dir   = (last_error >= 0) ? 1 : -1;
-            gourd_flip  = GOURD_FLIP_CYCLES;
-#endif
             /* ★★★ 2026-09-24 只统计【圈内】的相切点（队友方案第 2 步）★★★
                为什么必须加这道门：直角弯在【圈外】也会满足这三条判据
                （实测误报过 1 次，且不稳定）—— 不管它的话 GW 会被圈外误报推着走。
@@ -327,6 +323,18 @@ void line_follow_control(int16_t base)
                  差 1 拍 = 10ms，相对一圈几秒可忽略。 */
             if (ge_in_gourd && (gourd_waves < 200u))
             {
+#if GOURD_USE_FLIP
+              /* ★★★ 2026-09-24 翻转修正【也必须在这道门里】★★★
+                 实车病根：车进了葫芦圈就【锁在第 1 个圆上绕两圈】——
+                 因为相切点处走线要从圆 1 跨到圆 2，而圆 2 的曲率方向与圆 1 相反，
+                 PD 只顺着最强的那条线走 → 永远绕同一个圆。
+                 翻转修正就是治它的：命中相切点后强制把误差取反 15 拍，
+                 让车头【拐向另一个圆】。
+                 ⚠️ 但它一旦在圈外命中（直角弯），会让车在那儿突然反向修正 →
+                    直接把直角弯走废。所以必须跟着 ge_in_gourd 走。 */
+              gourd_dir  = (last_error >= 0) ? 1 : -1;   /* 进相切点前的误差方向 */
+              gourd_flip = GOURD_FLIP_CYCLES;            /* 反向修正保持的拍数 */
+#endif
               gourd_waves++;
               if (gourd_waves >= GOURD_TOTAL)
               {
