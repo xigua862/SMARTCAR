@@ -1118,6 +1118,15 @@ void line_follow_control(int16_t base)
      换算系数 RPM_PER_PWM_X100 在 app_config.h（标定依据见那里的注释）。 */
   tgt_rpm[0] = (float)((int32_t)m1 * (int32_t)RPM_PER_PWM_X100) / 100.0f;
   tgt_rpm[1] = (float)((int32_t)m2 * (int32_t)RPM_PER_PWM_X100) / 100.0f;
+#if SPD_USE_FEEDFORWARD
+  /* ★2026-09-24 加【前馈】：把"目标 PWM"直接当 PID 的基础输出，PID 只修误差。
+     没有它的时候：起步瞬间 目标=236RPM、实测=0 → P 项 = 0.4×236 ≈ 94
+       → 输出被顶到 99 → 两轮满油门窜出去（"莫名其妙猛冲"），等测速追上才回落。
+     有了它：静止时 目标=实测 → 输出 = 前馈（= 开环那个 PWM 值）→ 起步平顺，
+       而且积分项不必再顶到上限，稳态误差也随之变小。 */
+  spd_pid[0].bias = (float)m1;
+  spd_pid[1].bias = (float)m2;
+#endif
   {
     float dt = (float)CTRL_PERIOD_MS / 1000.0f;
     m1 = (int16_t)pid_update(&spd_pid[0], tgt_rpm[0], (float)speed_get_rpm(MOTOR_LEFT),  dt);
