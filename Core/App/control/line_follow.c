@@ -52,6 +52,11 @@ static uint8_t  boost_active    = 0;   /* 1 = 已进入提速档（accessor 会�
 /* ★葫芦弯相切点状态机（2026-09-22 他提的方案） */
 static uint8_t  gourd_latch  = 0;      /* 分离锁存：一段分离只记 1 次 */
 static uint8_t  gourd_waves  = 0;      /* 已识别的相切点个数（到 3 清零 = 绕完一圈） */
+/* ★2026-09-24 相切点新判据(三条)的状态：GZ 符号 / 翻号窗口 / 候选窗口+候选是否通过 */
+static int8_t   gz_sign   = 0;
+static uint8_t  flip_win  = 0;
+static uint8_t  cand_win  = 0;
+static uint8_t  cand_ok   = 0;
 #if GOURD_USE_FLIP
 static uint8_t  gourd_flip   = 0;      /* "翻转修正"剩余拍数（仅 GOURD_USE_FLIP=1 时用） */
 static int8_t   gourd_dir    = 1;      /* 进相切点前的误差方向 */
@@ -273,30 +278,52 @@ void line_follow_control(int16_t base)
     {
       if (r.raw & (uint16_t)(1u << i)) { if (L == 0xFFu) L = i; R = i; cnt++; }
     }
-    uint8_t separated = 0u;
-    if ((L != 0xFFu) && (cnt >= 2u))
+    /* ★2026-09-24 相切点判据【实测定稿·三条】(数据: _tmp/test2.txt 葫芦 vs 直角弯)
+       ① 宽图案(>=CROSS_ACTIVE_MIN 路) 且【只贴一端】—— 直角弯也会命中, 单靠它不够
+       ② GZ 在 ±8 拍内【翻号】—— 葫芦实测 -192→+200 (8 拍内)；直角弯宽图案时同号
+       ③ 事件后 6 拍内【不出现全灭】—— 直角弯必全灭(~330ms)，相切点一直有线
+       实现：①成立先挂"候选"(6 拍), 期内验收 ②③, 出现全灭立即作废。 */
     {
-      uint8_t span = (uint8_t)(R - L + 1u);
-      if ((uint8_t)(span - cnt) >= 1u) separated = 1u;   /* ★0924 他定稿: 空隙 >1 就算两组（实测 00001101 只有 1 路空隙）*/
-    }
-    if (separated)
-    {
-      if (!gourd_latch)                     /* 上升沿：一个相切点只记一次 */
+      uint8_t wide_one = 0u;
+      if ((L != 0xFFu) && (cnt >= (uint8_t)CROSS_ACTIVE_MIN))
       {
-        gourd_latch = 1u;
-#if GOURD_USE_FLIP
-        gourd_dir   = (last_error >= 0) ? 1 : -1;
-        gourd_flip  = GOURD_FLIP_CYCLES;
-#else
-        (void)last_error;      /* 翻转关掉时这两个变量不用 */
-#endif
-        if (gourd_waves < 200u) gourd_waves++;
-        if (gourd_waves >= GOURD_TOTAL) gourd_waves = 0;   /* 3 个相切点 = 绕完 4 个圆 */
+        uint8_t tL = (L == 0u)                   ? 1u : 0u;
+        uint8_t tR = (R == (LINE_CHANNELS - 1u)) ? 1u : 0u;
+        wide_one = (tL != tR) ? 1u : 0u;          /* 只贴一端 = 分支口/相切点 */
       }
-    }
-    else
-    {
-      gourd_latch = 0u;
+      {
+        int8_t s = (imu_get_gyro_z() >= 0.0f) ? 1 : -1;
+        if ((gz_sign != 0) && (s != gz_sign)) flip_win = 8u;   /* ★② 翻号 → 开窗口 */
+        else if (flip_win) flip_win--;
+        gz_sign = s;
+      }
+      if (cand_win)                                /* 候选期内验收 */
+      {
+        cand_win--;
+        if (r.active == 0u) { cand_win = 0u; cand_ok = 0u; }    /* ★③ 全灭 → 作废 */
+        else
+        {
+          if (flip_win) cand_ok = 1u;
+          if ((cand_win == 0u) && cand_ok && !gourd_latch)
+          {
+            gourd_latch = 1u;                      /* 一个相切点只记一次 */
+#if GOURD_USE_FLIP
+            gourd_dir   = (last_error >= 0) ? 1 : -1;
+            gourd_flip  = GOURD_FLIP_CYCLES;
+#endif
+            if (gourd_waves < 200u) gourd_waves++;
+            if (gourd_waves >= GOURD_TOTAL) gourd_waves = 0;   /* 3 个相切点 = 绕完 4 个圆 */
+          }
+        }
+      }
+      else if (wide_one && !gourd_latch)           /* ★① 起候选 */
+      {
+        cand_win = 6u; cand_ok = 0u;
+      }
+      else if (!wide_one)
+      {
+        gourd_latch = 0u;
+      }
     }
   }
 #endif
