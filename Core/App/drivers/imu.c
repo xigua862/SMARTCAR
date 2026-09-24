@@ -18,7 +18,15 @@
 #define MPU_ADDR    (IMU_I2C_ADDR)
 #define DEG_TO_RAD  (3.14159265358979f / 180.0f)
 #define RAD_TO_DEG  (180.0f / 3.14159265358979f)
-#define GYRO_2000   16.4f      /* ±2000dps 时陀螺灵敏度 LSB/(°/s) */
+/* ★陀螺灵敏度 LSB/(°/s) —— ★2026-09-24 不再是编译期常量：
+   imu_init() 会【读回 GYRO_CONFIG 的 FS_SEL】按实际生效的档位赋值。
+   为什么必须这么做（实测证据）：车正常跑时遥测 GZ 读到 1520~1990°/s，
+   而 0.82m/s 在 0.3m 半径上只有 ~157°/s —— 数值恰好差 131/16.4 ≈ **8 倍**，
+   说明 ±2000dps 的写入【没生效】（芯片还在 ±250 默认档），而换算却按 16.4 走。
+   后果：① IG 进圈判据(Σ|GZ|≥1000) 被任何弯道触发 → "在不在圈里"就不可信了
+        ② USE_YAW 的"转到 50°"其实只转了 ~6° → 出圈那一下根本没转够
+   下面这个初值只是兜底（±2000dps）。 */
+static float gyro_lsb = 16.4f;
 #define ACC_8G      4096.0f    /* ±8g 时加速度计灵敏度 LSB/g */
 
 extern I2C_HandleTypeDef hi2c2;
@@ -93,7 +101,7 @@ float imu_get_gyro_z(void)
 void imu_update(void)
 {
   imu_read_raw();
-  gz_dps = (float)gz / GYRO_2000;
+  gz_dps = (float)gz / gyro_lsb;
   if (calibrated) gz_dps -= gyro_bz;
 
   /* ★航向角积分
@@ -151,6 +159,19 @@ void imu_init(void)
   imu_write_reg(0x1B, 0x10);   /* GYRO_CONFIG: ±2000dps */
   imu_write_reg(0x1C, 0x10);   /* ACCEL_CONFIG: ±8g */
   imu_write_reg(0x1D, 0x00);   /* 加速度计低通 */
+  /* ★2026-09-24 读回 GYRO_CONFIG 的 FS_SEL(bit4:3)，按【实际生效】的档位选灵敏度
+     —— 见文件顶部 gyro_lsb 的说明：实测 GZ 比物理值大 8 倍 = 档位与换算不一致，
+     这一句就是修它的（写入没生效时不至于把 GZ 放大 8 倍）。 */
+  {
+    uint8_t fs = (uint8_t)((imu_read_reg(0x1B) >> 3) & 0x03u);
+    switch (fs)
+    {
+      case 0u: gyro_lsb = 131.0f; break;   /* ±250  dps */
+      case 1u: gyro_lsb =  65.5f; break;   /* ±500  dps */
+      case 2u: gyro_lsb =  32.8f; break;   /* ±1000 dps */
+      default: gyro_lsb =  16.4f; break;   /* ±2000 dps（也是读不到时的兜底） */
+    }
+  }
   calibrated = 0;
   pitch = 0.0f; roll = 0.0f;
   gz_dps = 0.0f;
@@ -164,9 +185,9 @@ void imu_calibrate(void)
   for (int i = 0; i < 100; i++)
   {
     imu_read_raw();
-    sx += (float)gx / GYRO_2000;
-    sy += (float)gy / GYRO_2000;
-    sz += (float)gz / GYRO_2000;
+    sx += (float)gx / gyro_lsb;
+    sy += (float)gy / gyro_lsb;
+    sz += (float)gz / gyro_lsb;
   }
   gyro_bx = sx / 100.0f;
   gyro_by = sy / 100.0f;
@@ -177,8 +198,8 @@ void imu_calibrate(void)
 void imu_read_angles(float* pitch_out, float* roll_out)
 {
   imu_read_raw();
-  float gxp = (float)gx / GYRO_2000;
-  float gyp = (float)gy / GYRO_2000;
+  float gxp = (float)gx / gyro_lsb;
+  float gyp = (float)gy / gyro_lsb;
   if (calibrated) { gxp -= gyro_bx; gyp -= gyro_by; }
 
   /* 加速度计定姿(静止较准, 有震动噪声) */
