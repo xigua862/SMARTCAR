@@ -57,6 +57,9 @@ static uint8_t  boost_active    = 0;   /* 1 = 已进入提速档（accessor 会�
      晚取的那一方几乎总是拿到空窗口）。
      所以统一"由相切点识别处取走、缓存到这里"，遥测读缓存。 */
 static uint16_t s_1k_missed = 0;
+/* ★2026-09-24 晚：IG=0 的"离开确认"计数（GW 清零用）。
+   见 IG 块末尾的说明 —— 实车日志证明 IG 会乱跳，立刻清零会把 GW 抹掉。 */
+static uint16_t s_ig_leave = 0;
 static uint16_t s_1k_total  = 0;
 static uint8_t  s_1k_maxact = 0;
 static uint16_t s_1k_maxraw = 0;
@@ -800,10 +803,27 @@ void line_follow_control(int16_t base)
      两道一起，圈外误报无论稳不稳定都翻不出浪。
      ★放在 IG 块的末尾：这一拍的 ge_in_gourd 已经算完，用的是最新值。 */
 #if USE_GOURD_SM
-  if (!ge_in_gourd)
+  /* ★★★ 2026-09-24 晚 修（实车日志证据）★★★
+     原来：IG=0 就【立刻】清零 GW。
+     日志证据：GW 反复走 0→1→2→(被清)→0→1→2，永远到不了 3（GOURD_TOTAL）→
+              出圈永远不触发。原因：ge_in_gourd(IG) 本身在实车上【乱跳】
+              （一秒内 0/1 反复多次，日志里 "GOURD-ENTRY mark set/cleared" 交替出现）。
+     修法：改成"离开确认"—— 连续 GOURD_IG_LEAVE_FRAMES 拍 IG=0 才清。
+           瞬时抖动不再抹掉已经数到的相切点。
+     ★为什么还留着清零：直角弯在圈外的误报必须能被清掉（队友方案的本意），
+       只是不该被"一次抖动"清掉。 */
+  if (ge_in_gourd)
   {
-    gourd_waves    = 0u;
-    gourd_wrap_evt = 0u;   /* 圈外不许留下"该出圈"的事件 */
+    s_ig_leave = 0u;                       /* 还在圈里 → 确认计数复位 */
+  }
+  else if (s_ig_leave < (uint16_t)GOURD_IG_LEAVE_FRAMES)
+  {
+    s_ig_leave++;                          /* 刚出圈，先观察 */
+  }
+  else
+  {
+    gourd_waves    = 0u;                   /* 确认离开了 → 才清 GW */
+    gourd_wrap_evt = 0u;
   }
 #endif
 #endif /* USE_GOURD_EXIT || USE_GOURD_LOST_GUARD */
@@ -1481,6 +1501,7 @@ void line_follow_init(void)
   gourd_waves  = 0;
 #if USE_GOURD_SM
   gourd_wrap_evt = 0;   /* ★出圈事件（跟 gourd_waves 同一个开关，声明/复位/使用同进同出） */
+  s_ig_leave     = 0;   /* ★"离开确认"计数（IG=0 连续多少拍才清 GW） */
 #endif
 #if GOURD_USE_FLIP
   gourd_flip   = 0;
