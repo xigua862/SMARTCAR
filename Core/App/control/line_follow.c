@@ -227,10 +227,34 @@ static uint8_t ge_is_entry_pattern(uint16_t raw)
 }
 #endif /* USE_GOURD_EXIT */
 
+/* ★起步盲直行（2026-09-24 用户要求）：读秒结束后先闷头直行 START_BLIND_MS，
+   完全不看传感器 —— 起点那两条斑马线会把 PD / 十字判据全部带跑。
+   剩余拍数由 line_follow_gourd_rearm() 在【每趟起步瞬间】装载（与出圈上膛同一处）。 */
+#if USE_START_BLIND
+static uint16_t start_blind = 0;
+#endif
+
 void line_follow_control(int16_t base)
 {
   line_reading_t r = line_read();
   int8_t e = r.error;
+
+#if USE_START_BLIND
+  /* ---- ★起步盲直行（最高优先级，先于一切判据）----
+     读秒刚结束那一小段：两轮等速直行，不给任何差速。
+     为什么不算"开环有害"：这是【已知直道 + 车头已摆正 + 时间固定】的起点，
+     不是他们复盘里被否定的"在弯道口闭眼转弯"。1 秒 ≈ 0.82m，足够越过起点区。 */
+  if (start_blind > 0u)
+  {
+    start_blind--;
+    motor_set_differential(sp_straight, sp_straight);
+    last_error  = 0;      /* 把起点那几条斑马线带来的乱七八糟清干净, 别带给后面的 PD */
+    last_e      = 0;
+    lost_cycles = 0;
+    line_lost   = 0;
+    return;
+  }
+#endif
 
   /* ---- ★葫芦弯相切点检测（判据按 2026-09-22 实测数据定）----
      实测：相切点处传感条看到"图案分裂成两组、往两边分离"
@@ -1214,6 +1238,11 @@ void line_follow_gourd_rearm(void)
 {
 #if USE_GOURD_EXIT
   ge_fired = 0u;
+#endif
+#if USE_START_BLIND
+  /* ★每趟起步的瞬间装载"盲直行"：这里正是 FSM 读完秒、清零里程、进 RUN 的那一处
+     （car_fsm.c 的 CAR_COUNTDOWN→CAR_RUN），所以不会在读秒期间被消耗掉。 */
+  start_blind = (uint16_t)(START_BLIND_MS / CTRL_PERIOD_MS);
 #endif
 }
 
