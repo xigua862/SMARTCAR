@@ -222,7 +222,7 @@ void telemetry_process_command(void)
     if (sec > 5) sec = 5;
     {
       car_state_t st = car_fsm_state();
-      if (st == CAR_IDLE || st == CAR_STOPPED)
+      if ((st != CAR_RUN) && (st != CAR_COUNTDOWN))   /* 急停也允许: 台架上方便 */
       {
         test_mode = 1;                        /* 让状态机让位, 由 app_loop 的测试态驱动 */
         telemetry_trace_reset();              /* 轨迹清零 → 回放就只有这 n 秒 */
