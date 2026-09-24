@@ -277,7 +277,7 @@ void line_follow_control(int16_t base)
     if ((L != 0xFFu) && (cnt >= 2u))
     {
       uint8_t span = (uint8_t)(R - L + 1u);
-      if ((uint8_t)(span - cnt) >= 2u) separated = 1u;   /* 组内空隙 >=2 路 = 两组 */
+      if ((uint8_t)(span - cnt) >= 1u) separated = 1u;   /* ★0924 他定稿: 空隙 >1 就算两组（实测 00001101 只有 1 路空隙）*/
     }
     if (separated)
     {
