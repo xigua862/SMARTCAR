@@ -926,11 +926,19 @@ void line_follow_control(int16_t base)
          GW 只在 IG=1 时累计、IG=0 时强制清零（见相切点检测那一段和 IG 块末尾）——
          所以圈外（直角弯）的误报"进门不许计、出门即清"，不依赖"误报是否稳定"。
          第 3 个相切点一到，GW 归 0 → 这一个事件就是出口。
-         ★不直接用 `gourd_waves == 0` 判：发车时它本来就是 0，会一起步就右转。 */
+         ★不直接用 `gourd_waves == 0` 判：发车时它本来就是 0，会一起步就右转。
+
+         ★2026-09-24 晚：本判据已由 GOURD_EXIT_USE_GW 【关掉】——
+           实车验证"仍然走不了葫芦圈"，用户要求改回【里程】判据。
+           GW 的计数与遥测照旧（还能继续观察相切点判据准不准）。
+         ★事件位无论开关都【照样消费】：这样 gourd_wrap_evt 永远是被读的，
+           不会退化成"只写不读"→ ARMCC #550-D 告警（本项目要求 0 警告）。 */
       if ((trig_now == 0u) && gourd_wrap_evt)
       {
+#if GOURD_EXIT_USE_GW
         trig_now       = 4u;
-        gourd_wrap_evt = 0u;          /* 事件消费掉，一次只转一次 */
+#endif
+        gourd_wrap_evt = 0u;          /* 消费掉，一次只转一次（关掉时也不留残值） */
       }
 #endif
 
