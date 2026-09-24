@@ -41,9 +41,13 @@ static uint8_t  det_prev     = 0;  /* 上一拍是否"落在十字时间窗"（�
 static uint8_t  wide_gap     = 0;  /* 宽图案已连续消失多少拍（★事件计数防抖，见 app_config） */
 static uint8_t  wide_armed   = 1;  /* 本段宽图案"可否计数"：★在段首那一拍判定并锁存整段 */
 
-/* ★直线提速（2026-09-22） */
+/* ★直线提速（2026-09-22）—— ★2026-09-24 关掉（USE_STRAIGHT_BOOST=0）：
+   关掉时 straight_cycles 只在 init 里被写、没人读 → 会报 "set but never used"。
+   所以声明和复位都跟着开关走（#if 范围必须一致，这是本项目踩过的老坑）。 */
+#if USE_STRAIGHT_BOOST
 static uint16_t straight_cycles = 0;   /* 连续"直线"拍数 */
-static uint8_t  boost_active    = 0;   /* 1 = 已进入提速档 */
+#endif
+static uint8_t  boost_active    = 0;   /* 1 = 已进入提速档（accessor 会读, 所以不受开关影响） */
 
 /* ★葫芦弯相切点状态机（2026-09-22 他提的方案） */
 static uint8_t  gourd_latch  = 0;      /* 分离锁存：一段分离只记 1 次 */
@@ -1292,7 +1296,9 @@ void line_follow_init(void)
   wide_cnt    = 0;
   on_cross    = 0;
   wide_long   = 0;
-  straight_cycles = 0;
+#if USE_STRAIGHT_BOOST
+  straight_cycles = 0;   /* 只在提速开着时才存在（见顶部声明的 #if） */
+#endif
   boost_active = 0;
   gourd_latch  = 0;
   gourd_waves  = 0;
