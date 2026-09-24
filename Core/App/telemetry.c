@@ -67,7 +67,68 @@ void telemetry_banner(void)
 }
 
 /* 打印当前状态: 版本标签 + IR 8 路位图 + RPM + KP/KD/SP + 状态机状态 */
+/* ★轨迹黑匣子（2026-09-24）：控制拍里记录最近 TRACE_N 拍的 IR/GZ/OD，`Q` 回放。
+   为什么要它：跑车时 USB 线会拖，而"过直角弯/出口那几秒"正是最需要看的数据。
+   用法：跑完停下 → 串口发 `Q` → 按时间顺序回放 600 拍（6 秒 @100Hz）。
+   ⚠️ 回放是阻塞发送（600 行 ≈ 1.6 秒），所以请【停下来再发】。 */
+#define TRACE_N 600
+typedef struct { uint16_t od; int16_t gz; uint8_t ir; } trace_t;
+static trace_t  s_tr[TRACE_N];
+static uint16_t s_tr_i = 0u;   /* 写指针 */
+static uint16_t s_tr_n = 0u;   /* 已写条数 */
+
+void telemetry_trace_tick(void)
+{
+  line_reading_t r = line_read();
+  s_tr[s_tr_i].od = (uint16_t)odom_distance_mm();
+  s_tr[s_tr_i].gz = (int16_t)imu_get_gyro_z();
+  s_tr[s_tr_i].ir = (uint8_t)(r.raw & 0xFFu);
+  s_tr_i = (uint16_t)((s_tr_i + 1u) % (uint16_t)TRACE_N);
+  if (s_tr_n < (uint16_t)TRACE_N) s_tr_n++;
+}
+
+void telemetry_trace_dump(void)
+{
+  char b[64];
+  uint16_t i = (s_tr_n < (uint16_t)TRACE_N) ? 0u : s_tr_i;   /* 环满则从最旧的开始 */
+  telemetry_msg("--- TRACE begin (oldest first) ---");
+  for (uint16_t k = 0u; k < s_tr_n; k++)
+  {
+    char ir[LINE_CHANNELS + 1];
+    for (uint8_t j = 0u; j < LINE_CHANNELS; j++)
+      ir[j] = (s_tr[i].ir >> j) & 1u ? '1' : '0';
+    ir[LINE_CHANNELS] = '\0';
+    int n = snprintf(b, sizeof(b), "T%03u IR:%s GZ=%5d OD=%u\r\n",
+                     (unsigned)k, ir, (int)s_tr[i].gz, (unsigned)s_tr[i].od);
+    if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 100);
+    i = (uint16_t)((i + 1u) % (uint16_t)TRACE_N);
+  }
+  telemetry_msg("--- TRACE end ---");
+}
+
+/* ★2026-09-24：默认遥测改成【短核心行】（≈67 字符 → 80 列终端不再折行）。
+   理由：他反馈"输出又多又杂、看不懂"。细节全部挪到 `H` 指令（下面那个长行函数）。 */
 void telemetry_report(void)
+{
+  line_reading_t r = line_read();
+  char ir[LINE_CHANNELS + 1];
+  for (uint8_t i = 0; i < LINE_CHANNELS; i++)
+    ir[i] = (r.raw >> i) & 1u ? '1' : '0';
+  ir[LINE_CHANNELS] = '\0';
+
+  uint16_t k1m = line_1k_take(NULL, NULL, NULL);   /* 只留"100Hz 漏看数"当信号灯 */
+
+  char buf[96];
+  int n = snprintf(buf, sizeof(buf),
+    "FW:%s ST=%d IR:%s RPM1=%d RPM2=%d OD=%ld GZ=%d K1=%d\r\n",
+    FW_TAG, (int)car_fsm_state(), ir,
+    speed_get_rpm(MOTOR_LEFT), speed_get_rpm(MOTOR_RIGHT),
+    (long)odom_distance_mm(), (int)imu_get_gyro_z(), (int)k1m);
+  if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)n, 100);
+}
+
+/* ★完整长行（所有细节）—— 由 `H` 指令按需打印, 不再每拍刷屏。 */
+void telemetry_print_full(void)
 {
   /* ★2026-09-23 晚：speed_update() 不再在这里调用 —— 已挪到 app_loop 的控制拍里
      （10ms 一次）。原来只在这里算 → 速度闭环拿到的是 50ms 前的旧值。
@@ -144,7 +205,7 @@ void telemetry_process_command(void)
 
   /* ★2026-09-22：白名单 —— 只认已知命令；噪声凑出来的字符串直接丢掉，不回话
      ★2026-09-23 加 O / Z：里程计读数与清零（手推标定葫芦圈出口里程用） */
-  if (strchr("PSDTMLBRVHXOZ", c) == NULL) return;
+  if (strchr("PSDTMLBRVHXOZQ", c) == NULL) return;
   char buf[112];
   int  n = 0;
 
@@ -170,8 +231,14 @@ void telemetry_process_command(void)
     if (v >= 0.0f && v <= 20.0f) kd_x10 = (int16_t)(v * 10.0f + 0.5f);
     n = snprintf(buf, sizeof(buf), "OK KD=%d.%d\r\n", kd_x10 / 10, kd_x10 % 10);
   }
-  else if (c == 'H')                        /* 诊断: 8 路原始位图 + 按键 + 编码器 + IMU */
+  else if (c == 'Q')                        /* ★轨迹回放（黑匣子）—— 请停下再发 */
   {
+    telemetry_trace_dump();
+    n = 0;                                  /* 内容已经打完, 不再另回一行 */
+  }
+  else if (c == 'H')                        /* 诊断: 完整长行 + 8 路原始位图 + 按键 + 编码器 + IMU */
+  {
+    telemetry_print_full();                 /* ★2026-09-24: 细节全在这一行（默认不再每拍刷屏） */
     line_reading_t r = line_read();
     char ir[LINE_CHANNELS + 1];
     for (uint8_t i = 0; i < LINE_CHANNELS; i++)

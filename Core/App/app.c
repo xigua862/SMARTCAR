@@ -75,6 +75,7 @@ void app_loop(void)
        实测症状：闭环能把转速稳在目标附近，但稳态差 2~7%、修正很慢。
        现在挪到控制拍里（10ms 一次）→ 反馈新鲜；遥测只是把这个值读走打印。 */
     speed_update();
+    telemetry_trace_tick();   /* ★2026-09-24 轨迹黑匣子: 按控制拍记录最近 600 拍(IR/GZ/OD) */
 
     if (test_mode == 0) car_fsm_run((uint32_t)CTRL_PERIOD_MS);
   }
