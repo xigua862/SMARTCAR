@@ -200,6 +200,11 @@ static uint8_t  ge_in_gourd = 0;    /* 1 = 已打上"进过圈"印记 */
 static uint16_t ge_mark_ttl = 0;    /* 印记剩余存活拍数（只当保险） */
 static uint8_t  ge_fired    = 0;    /* ★1 = 本次进圈【已经】出圈转过一次了（一次性锁存） */
 static uint16_t ge_plain_cnt = 0;   /* ★连续多少拍是"普通线"（用于判定离开葫芦圈） */
+/* ★2026-09-25 CARD-003：IG 清零重构的状态（与 ge_in_gourd 同一个 #if 范围，同进同出） */
+static uint8_t  ge_confirmed = 0;  /* 本次进圈后已数到过>=1个相切点(=葫芦坐实) */
+static uint8_t  ge_done      = 0;  /* GW 已归零(相切点全部过完) */
+static uint16_t ge_straight  = 0;  /* ge_done 后的连续普通线拍数 */
+static uint16_t ge_stay      = 0;  /* IG=1 持续拍数(兜底用) */
 #if USE_GOURD_SLOWDOWN
 static uint16_t ge_frames   = 0;    /* ★进圈后经过的拍数（后半段减速用） */
 #endif
@@ -416,11 +421,13 @@ void line_follow_control(int16_t base)
               gourd_flip = GOURD_FLIP_CYCLES;            /* 反向修正保持的拍数 */
 #endif
                 s_wave_odom = odom_distance_mm();        /* 记下本次相切点的位置 */
+                ge_confirmed = 1u;                      /* ★CARD-003：葫芦坐实（数到过>=1个相切点） */
                 gourd_waves++;
                 if (gourd_waves >= GOURD_TOTAL)
                 {
                   gourd_waves    = 0;   /* 归 0 = 第 3 个相切点 = 绕完 4 个圆 */
                   gourd_wrap_evt = 1u;  /* ★置出圈事件（由出圈触发块消费） */
+                  ge_done        = 1u;  /* ★CARD-003：相切点全部过完 */
                 }
               }
             }
@@ -793,6 +800,7 @@ void line_follow_control(int16_t base)
       {
         ge_in_gourd  = 1u;                             /* ★0→1 边沿：进圈 */
         ge_plain_cnt = 0u;                             /* 复位普通线计数（否则本圈印记会被立刻清） */
+        ge_stay      = 0u;                             /* ★CARD-003：IG=1 持续拍数从进圈边沿起算 */
         /* ★记下"进圈那一刻"的里程读数 —— 出口判据③（按里程强制右转）以它为 0 点。
            这样标定出来的 GOURD_EXIT_ODOM_MM 与"车从哪儿发车"无关，换位置不用重标。 */
         ge_odom_entry = odom_distance_mm();
@@ -814,9 +822,10 @@ void line_follow_control(int16_t base)
         telemetry_msg("GOURD-ENTRY mark set (in gourd)");
       }
     }
-    else
+    else if (!ge_confirmed)
     {
-      /* ★离开葫芦圈的判据：连续 GOURD_ENTRY_CLEAR_FRAMES 拍是"普通线"才算出去。
+      /* 【Path②】GW 未坐实：旧快清【原样保留】——圈外误点 IG(普通弯道/直角弯) 200ms 内释放。
+         ★离开葫芦圈的判据：连续 GOURD_ENTRY_CLEAR_FRAMES 拍是"普通线"才算出去。
          （葫芦圈里传感器一直看到"有暗缝的分离图案"；出圈后就是普通一条线。）
          ★TTL 只当保险：万一一直不出现普通线，最多 GOURD_ENTRY_MARK_TTL 拍后强制清。 */
       if (ge_mark_ttl > 0u) ge_mark_ttl--;
@@ -846,6 +855,10 @@ void line_follow_control(int16_t base)
         ge_in_gourd  = 0u;                             /* 确认离开葫芦圈 */
         ge_plain_cnt = 0u;
         ge_mark_ttl  = 0u;
+        ge_confirmed = 0u;                             /* ★CARD-003：IG 清 0 同清四个新状态 */
+        ge_done      = 0u;
+        ge_straight  = 0u;
+        ge_stay      = 0u;
 #if GOURD_EXIT_ONE_SHOT
         /* ★解锁时机：同上 —— 从起步起算时这里也不解锁（会无限重复右转）。 */
 #if !(USE_GOURD_EXIT_ODOM && GOURD_EXIT_ODOM_FROM_START)
@@ -853,6 +866,55 @@ void line_follow_control(int16_t base)
 #endif
 #endif
         telemetry_msg("GOURD-ENTRY mark cleared (left gourd, back on plain line)");
+      }
+    }
+    /* ★CARD-003：ge_confirmed==1 且 ig_now==0 → 什么都不做，IG 保持 1（修"圈内乱跳 0"） */
+
+    /* ★CARD-003：GW 坐实后，IG 只在下面两条路径清（正常出圈 / 兜底） */
+    if (ge_in_gourd)
+    {
+      if (ge_stay < 60000u) ge_stay++;
+
+      /* 【Path①】正常出圈：GW 数满后，连续普通线 GOURD_EXIT_STRAIGHT_FRAMES 拍。
+         直角弯图案不是普通线（ge_is_plain_line 返回 0）→ ge_straight 天然清零。 */
+      if (ge_done)
+      {
+        if (ge_is_plain_line(r.raw)) ge_straight++;
+        else                         ge_straight = 0u;
+        if (ge_straight >= (uint16_t)GOURD_EXIT_STRAIGHT_FRAMES)
+        {
+          ge_in_gourd  = 0u;
+          ge_plain_cnt = 0u;
+          ge_mark_ttl  = 0u;
+          ge_confirmed = 0u;
+          ge_done      = 0u;
+          ge_straight  = 0u;
+          ge_stay      = 0u;
+#if GOURD_EXIT_ONE_SHOT
+#if !(USE_GOURD_EXIT_ODOM && GOURD_EXIT_ODOM_FROM_START)
+          ge_fired = 0u;
+#endif
+#endif
+          telemetry_msg("GOURD-ENTRY mark cleared (done+straight)");
+        }
+      }
+
+      /* 【Path③】兜底：IG=1 持续 GOURD_IG_FAILSAFE_FRAMES 拍强清（防 GW 数不满死在圈里） */
+      if (ge_stay >= (uint16_t)GOURD_IG_FAILSAFE_FRAMES)
+      {
+        ge_in_gourd  = 0u;
+        ge_plain_cnt = 0u;
+        ge_mark_ttl  = 0u;
+        ge_confirmed = 0u;
+        ge_done      = 0u;
+        ge_straight  = 0u;
+        ge_stay      = 0u;
+#if GOURD_EXIT_ONE_SHOT
+#if !(USE_GOURD_EXIT_ODOM && GOURD_EXIT_ODOM_FROM_START)
+        ge_fired = 0u;
+#endif
+#endif
+        telemetry_msg("GOURD-IG FAILSAFE clear");
       }
     }
   }
@@ -884,6 +946,9 @@ void line_follow_control(int16_t base)
   {
     gourd_waves    = 0u;                   /* 确认离开了 → 才清 GW */
     gourd_wrap_evt = 0u;
+    ge_confirmed   = 0u;                   /* ★CARD-003：清 GW 同处同清（IG 早已清过，保险再清） */
+    ge_done        = 0u;
+    ge_straight    = 0u;
     s_wave_odom    = odom_distance_mm();   /* ★同时把"上一个相切点位置"对齐到现在 ——
                                               这样下一圈的第一个相切点不会被上一圈的
                                               位置门槛误挡掉 */
@@ -1694,6 +1759,10 @@ void line_follow_init(void)
   ge_mark_ttl   = 0;
   ge_fired      = 0;
   ge_plain_cnt  = 0;
+  ge_confirmed  = 0;   /* ★CARD-003：四个新状态与 ge_in_gourd 同处复位 */
+  ge_done       = 0;
+  ge_straight   = 0;
+  ge_stay       = 0;
 #if USE_GOURD_SLOWDOWN
   ge_frames     = 0;
 #endif
