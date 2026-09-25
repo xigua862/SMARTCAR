@@ -155,8 +155,29 @@ uint8_t imu_yaw_is_valid(void)
 void imu_init(void)
 {
   imu_write_reg(0x6B, 0x00);   /* PWR_MGMT_1: 唤醒 */
+  /* ★★★ 2026-09-24 晚：唤醒后延时 + 量程写后校验 + 重试 ★★★
+     实车日志证据（FW:0924-2615）：遥测 GZ 反复出现【同一个值 -247】（还有 +250）——
+     那是【削顶】的签名：±250dps 档满量程 = 32767/131 ≈ 250。
+     说明 0x1B 的写入【没生效】，芯片留在 ±250 默认档；
+     车转速一超过 250°/s，读数就被钉住 → 航向角积分【少算】→
+     出圈"转到 85°"实际会转过头。这也是历史上一串"转过头/转不够"的来源之一。
+     下面三句：① 等起振稳定再写；② 写完读回 FS_SEL 校验；③ 不对就重写一次。
+     ★末尾"读回 FS_SEL 选 gyro_lsb"那段照旧保留 —— 兜底，
+       保证即使写入始终不生效，换算也永远和实际档位一致。 */
+  HAL_Delay(50);
   imu_write_reg(0x1A, 0x00);   /* CONFIG: 关闭DLPF */
-  imu_write_reg(0x1B, 0x10);   /* GYRO_CONFIG: ±2000dps */
+  /* ★GYRO_CONFIG: 0x10 = FS_SEL=2 = **±1000 dps**
+     ⚠️ 原注释写"±2000dps"是错的（±2000 要 FS_SEL=3 → 0x18）。
+     这里【故意保留 ±1000】：灵敏度 32.8 LSB/(°/s)，分辨率比 ±2000 高一倍，
+     而 ±1000°/s 对循迹车完全够（实测急转也就 250~300°/s，±250 档会削顶）。 */
+  imu_write_reg(0x1B, 0x10);
+  HAL_Delay(10);
+  if (((imu_read_reg(0x1B) >> 3) & 0x03u) != 2u)
+  {
+    HAL_Delay(50);                     /* 再给一次起振时间，然后重写 */
+    imu_write_reg(0x1B, 0x10);
+    HAL_Delay(10);
+  }
   imu_write_reg(0x1C, 0x10);   /* ACCEL_CONFIG: ±8g */
   imu_write_reg(0x1D, 0x00);   /* 加速度计低通 */
   /* ★2026-09-24 读回 GYRO_CONFIG 的 FS_SEL(bit4:3)，按【实际生效】的档位选灵敏度
@@ -175,7 +196,28 @@ void imu_init(void)
   calibrated = 0;
   pitch = 0.0f; roll = 0.0f;
   gz_dps = 0.0f;
-  present = (imu_who_am_i() == 0x68) ? 1u : 0u;
+  /* ★★★ 2026-09-24 修 present：WHO_AM_I 只读一次，读挂了就永远是 0 ★★★
+     实车证据（交接文档第三节）：遥测出现 `WHO=70 / IMU=0` —— WHO_AM_I 读到 0x70
+     而不是 0x68 → present=0 → app_init 里 `if (imu_is_present()) imu_calibrate();`
+     被跳过 → **陀螺零偏没标定** → GZ 带直流偏置 →
+     相切点判据的"GZ ±8 拍内翻号"被这点偏移+噪声满足 → 圈外误报。
+     两道修：① 重试 3 次（I2C 偶发失败很常见）；② 仍失败就用"原始数据能不能读回来"兜底。
+     ★为什么兜底可信：imu_read_raw() 失败时会【提前 return】、全局量保持不动，
+       而静止时 az 必然含着重力分量 ≠ 0 → 只要读到一个非 0 值就说明 I2C 通了。 */
+  {
+    uint8_t ok = 0u;
+    for (uint8_t k = 0u; k < 3u; k++)
+    {
+      if (imu_who_am_i() == 0x68u) { ok = 1u; break; }
+      HAL_Delay(5);
+    }
+    if (!ok)
+    {
+      imu_read_raw();                      /* 失败会提前返回，全局量不变 */
+      if ((ax != 0) || (ay != 0) || (az != 0) || (gz != 0)) ok = 1u;
+    }
+    present = ok;
+  }
 }
 
 /* 三轴陀螺零偏: 静止采样 100 次取平均(开机时调用一次) */

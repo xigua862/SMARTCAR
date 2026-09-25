@@ -33,6 +33,12 @@ static uint8_t  line_lost   = 0;
 static uint8_t  wide_cnt    = 0;   /* 宽图案持续拍数 */
 static uint8_t  on_cross    = 0;   /* 1 = 判定为十字（直行通过） */
 static uint8_t  wide_long   = 0;   /* 1 = 宽图案持续过久 → 不是十字（圆出口/直角入口） */
+static uint8_t  s_wo_hold   = 0;   /* ★相切点强制直行剩余拍数（WIDE_ONE_GO_STRAIGHT）*/
+#if GOURD_ARC_FLIP
+static int32_t  s_arc_mdeg  = 0;   /* ★同号偏航累计（毫度）—— 绕圈/相切点检测 */
+static uint8_t  s_arc_push  = 0;   /* ★反向打舵剩余拍数 */
+static int8_t   s_arc_dir   = 0;   /* ★反向打舵方向（±1）*/
+#endif
 /* ★2026-09-22 15:31 十字判据修正 + 事件计数/打印 */
 static uint16_t cross_events = 0;  /* 一趟里"判定为十字"的次数（遥测 CX=） */
 static uint16_t branch_events = 0; /* 一趟里"宽图案只贴一端 → 拒绝当十字"的次数（遥测 BR=） */
@@ -49,9 +55,35 @@ static uint16_t straight_cycles = 0;   /* 连续"直线"拍数 */
 #endif
 static uint8_t  boost_active    = 0;   /* 1 = 已进入提速档（accessor 会读, 所以不受开关影响） */
 
+/* ★2026-09-24 晚：本窗口的 1kHz 采样统计（遥测 K1= / MX=）。
+   ★为什么放在这里而不是让遥测直接调 line_1k_take：
+     line_1k_take 会【清零】窗口统计（missed/total/maxact/maxraw 全清），
+     相切点识别那边已经取走了 maxact/maxraw —— 如果遥测再取一次，
+     两边就各拿到半个窗口，谁都看不全（而且相切点识别是 100Hz、遥测只有 20Hz，
+     晚取的那一方几乎总是拿到空窗口）。
+     所以统一"由相切点识别处取走、缓存到这里"，遥测读缓存。 */
+static uint16_t s_1k_missed = 0;
+/* ★2026-09-24 晚：IG=0 的"离开确认"计数（GW 清零用）。
+   见 IG 块末尾的说明 —— 实车日志证明 IG 会乱跳，立刻清零会把 GW 抹掉。 */
+static uint16_t s_ig_leave = 0;
+/* ★2026-09-24 晚：上一个相切点被记下时的里程读数。
+   用来做"两个相切点之间至少要隔 GOURD_WAVE_MIN_MM 毫米"的门槛 ——
+   实车日志里误报是成簇的（两个"相切点"只隔 47mm），会把 GW 提前推满。 */
+static int32_t  s_wave_odom = 0;
+static uint16_t s_1k_total  = 0;
+static uint8_t  s_1k_maxact = 0;
+static uint16_t s_1k_maxraw = 0;
+
 /* ★葫芦弯相切点状态机（2026-09-22 他提的方案） */
 static uint8_t  gourd_latch  = 0;      /* 分离锁存：一段分离只记 1 次 */
 static uint8_t  gourd_waves  = 0;      /* 已识别的相切点个数（到 3 清零 = 绕完一圈） */
+#if USE_GOURD_SM
+/* ★★★ 2026-09-24 新增：出圈触发事件（队友方案第 3 步）★★★
+   GW 归 0（= 第 3 个相切点）时置 1，被出圈触发块消费后清 0。
+   ★为什么用独立事件位、而不是直接判 `gourd_waves == 0`：
+     发车时 GW 本来就是 0 —— 直接判的话车一启动就会立刻右转。 */
+static uint8_t  gourd_wrap_evt = 0;
+#endif
 /* ★2026-09-24 相切点新判据(三条)的状态：GZ 符号 / 翻号窗口 / 候选窗口+候选是否通过 */
 static int8_t   gz_sign   = 0;
 static uint8_t  flip_win  = 0;
@@ -273,23 +305,47 @@ void line_follow_control(int16_t base)
      规则：最左活跃 L 与最右活跃 R 之间空 >=2 路 → 判"分离"；分离期间只记 1 次（锁存）。*/
 #if USE_GOURD_SM
   {
-    uint8_t L = 0xFFu, R = 0u, cnt = 0u;
-    for (uint8_t i = 0; i < LINE_CHANNELS; i++)
-    {
-      if (r.raw & (uint16_t)(1u << i)) { if (L == 0xFFu) L = i; R = i; cnt++; }
-    }
+    /* ★★★ 2026-09-24 晚：相切点识别改用【1kHz 过采样】的位图（用户方案）★★★
+       用户实测观察："小车在过葫芦圈里的弯道的时候转速特别大，
+                     实际上的识别窗口就变小了" —— 完全正确：
+       车转得快，"宽 + 只贴一端"这个图案可能只存在 1~3ms，
+       而相切点判据原来只看 100Hz 那一拍（每 10ms 才采一次）→ 直接漏掉 →
+       相切点识别不到 → 翻转修正不触发 → 车就锁在同一个圆上绕圈。
+       ★本工程早就有 1kHz 采样器（SysTick 里 line_sample_1khz）：
+         os1k_maxact / os1k_maxraw = 【本窗口内亮路数最多的那一帧的完整位图】。
+         现在把它取出来，和当前拍的位图【取或】—— 哪个满足判据就算命中。
+       ★为什么在这里取（而不是留给遥测）：line_1k_take 会【清零】窗口，
+         两边各取一次就把窗口切成两半、谁也看不全。
+         所以统一由这里取走，遥测的 K1 改读 line_follow_1k_missed()。 */
+    uint16_t bm1k   = 0u;
+    uint8_t  act1k  = 0u;
+    s_1k_missed = line_1k_take(&s_1k_total, &act1k, &bm1k);
+    s_1k_maxact = act1k;
+    s_1k_maxraw = bm1k;
+
     /* ★2026-09-24 相切点判据【实测定稿·三条】(数据: _tmp/test2.txt 葫芦 vs 直角弯)
        ① 宽图案(>=CROSS_ACTIVE_MIN 路) 且【只贴一端】—— 直角弯也会命中, 单靠它不够
        ② GZ 在 ±8 拍内【翻号】—— 葫芦实测 -192→+200 (8 拍内)；直角弯宽图案时同号
        ③ 事件后 6 拍内【不出现全灭】—— 直角弯必全灭(~330ms)，相切点一直有线
-       实现：①成立先挂"候选"(6 拍), 期内验收 ②③, 出现全灭立即作废。 */
+       实现：①成立先挂"候选"(6 拍), 期内验收 ②③, 出现全灭立即作废。
+       ★① 改成对【当前拍】和【1kHz 窗口最宽那帧】各算一次，任一命中即算成立。 */
     {
       uint8_t wide_one = 0u;
-      if ((L != 0xFFu) && (cnt >= (uint8_t)CROSS_ACTIVE_MIN))
+      for (uint8_t pass = 0u; (pass < 2u) && (wide_one == 0u); pass++)
       {
-        uint8_t tL = (L == 0u)                   ? 1u : 0u;
-        uint8_t tR = (R == (LINE_CHANNELS - 1u)) ? 1u : 0u;
-        wide_one = (tL != tR) ? 1u : 0u;          /* 只贴一端 = 分支口/相切点 */
+        uint16_t bm = (pass == 0u) ? r.raw : bm1k;
+        uint8_t L = 0xFFu, R = 0u, cnt = 0u;
+        if (bm == 0u) continue;                     /* 1kHz 那帧本来就没有 → 跳过 */
+        for (uint8_t i = 0; i < LINE_CHANNELS; i++)
+        {
+          if (bm & (uint16_t)(1u << i)) { if (L == 0xFFu) L = i; R = i; cnt++; }
+        }
+        if ((L != 0xFFu) && (cnt >= (uint8_t)CROSS_ACTIVE_MIN))
+        {
+          uint8_t tL = (L == 0u)                   ? 1u : 0u;
+          uint8_t tR = (R == (LINE_CHANNELS - 1u)) ? 1u : 0u;
+          wide_one = (tL != tR) ? 1u : 0u;          /* 只贴一端 = 分支口/相切点 */
+        }
       }
       {
         int8_t s = (imu_get_gyro_z() >= 0.0f) ? 1 : -1;
@@ -307,12 +363,67 @@ void line_follow_control(int16_t base)
           if ((cand_win == 0u) && cand_ok && !gourd_latch)
           {
             gourd_latch = 1u;                      /* 一个相切点只记一次 */
-#if GOURD_USE_FLIP
-            gourd_dir   = (last_error >= 0) ? 1 : -1;
-            gourd_flip  = GOURD_FLIP_CYCLES;
+            /* ★★★ 2026-09-24 只统计【圈内】的相切点（队友方案第 2 步）★★★
+               为什么必须加这道门：直角弯在【圈外】也会满足这三条判据
+               （实测误报过 1 次，且不稳定）—— 不管它的话 GW 会被圈外误报推着走。
+               配合"IG=0 强制清零 GW"（见本函数后面的 IG 块）：
+                 圈外误报 -> 进门即清，绕完一圈回到 0 也清 -> 不依赖"误报是否稳定"。
+               ★这里用的 ge_in_gourd 是【上一拍】的值（IG 块在本函数后面才更新），
+                 差 1 拍 = 10ms，相对一圈几秒可忽略。 */
+            if (ge_in_gourd && (gourd_waves < 200u))
+            {
+              /* ★★★ 2026-09-24 晚：相切点必须【彼此隔开】才算数（实车日志驱动）★★★
+                 日志证据：OD=864 记 GW=1、OD=913 记 GW=2 —— 只隔 47mm！
+                 47mm 不可能是两个真相切点（葫芦圈那几个圆是几百毫米量级）
+                 ⇒ 误报是成簇的：一次真实宽图案被判成 2~3 个相切点 →
+                   GW 提前凑满 3 → 归 0 → 右转提前触发 →
+                   车在没有出口线的位置拐 85°，转完就是 IR 全灭。
+                 修法：距上一个相切点不足 GOURD_WAVE_MIN_MM 毫米 → 不计数。 */
+              if ((odom_distance_mm() - s_wave_odom) >= (int32_t)GOURD_WAVE_MIN_MM)
+              {
+#if 1   /* ★事件打印始终保留（纯观察，不改转向）；直行窗口由下面的赋值单独开关 */
+                /* ★★★ 2026-09-25 相切点【判定成立】→ 给转向发一个"直穿过去"窗口 ★★★
+                   为什么必须在这里发：相切点图案是"只贴一端"的宽图案，
+                   进不了 on_cross（要求两端都贴）也进不了 wide_long（要求持续>6拍），
+                   于是 PD 按单边大误差继续转 → 顺着圆弧绕圈
+                   （实车：第 3 个圈绕了一整圈才跨过去）。
+                   几何：两圆外切 → 相切点处共用一条切线 → 航向连续 → 直行正确。
+                   为什么用这个门：cand_ok(陀螺翻号②) + 无全灭③ 才是"真相切点"，
+                   圈外直角弯同样满足 wide_one，但过不了②③ → 不会被误加直行。 */
+#if WIDE_ONE_GO_STRAIGHT
+                s_wo_hold = (uint8_t)WIDE_ONE_HOLD_FRAMES;
 #endif
-            if (gourd_waves < 200u) gourd_waves++;
-            if (gourd_waves >= GOURD_TOTAL) gourd_waves = 0;   /* 3 个相切点 = 绕完 4 个圆 */
+                {
+                  /* ★一次性事件打印：下一次跑车时，日志里【每个真相切点应当出现一行】，
+                     出现几次 = 有几个相切点被确认；一行都没有 = 判据没成立。 */
+                  char _m[80];
+                  (void)snprintf(_m, sizeof(_m),
+                                 "GOURD-TANGENT: straight %d fr (OD=%ld GW=%d)",
+                                 (int)WIDE_ONE_HOLD_FRAMES, (long)odom_distance_mm(), (int)gourd_waves);
+                  telemetry_msg(_m);
+                }
+#endif
+#if GOURD_USE_FLIP
+              /* ★★★ 2026-09-24 翻转修正【也必须在这道门里】★★★
+                 实车病根：车进了葫芦圈就【锁在第 1 个圆上绕两圈】——
+                 因为相切点处走线要从圆 1 跨到圆 2，而圆 2 的曲率方向与圆 1 相反，
+                 PD 只顺着最强的那条线走 → 永远绕同一个圆。
+                 翻转修正就是治它的：命中相切点后强制把误差取反 15 拍，
+                 让车头【拐向另一个圆】。
+                 ⚠️ 但它一旦在圈外命中（直角弯），会让车在那儿突然反向修正 →
+                    直接把直角弯走废。所以必须跟着 ge_in_gourd 走。 */
+              gourd_dir  = (last_error >= 0) ? 1 : -1;   /* 进相切点前的误差方向 */
+              gourd_flip = GOURD_FLIP_CYCLES;            /* 反向修正保持的拍数 */
+#endif
+                s_wave_odom = odom_distance_mm();        /* 记下本次相切点的位置 */
+                gourd_waves++;
+                if (gourd_waves >= GOURD_TOTAL)
+                {
+                  gourd_waves    = 0;   /* 归 0 = 第 3 个相切点 = 绕完 4 个圆 */
+                  gourd_wrap_evt = 1u;  /* ★置出圈事件（由出圈触发块消费） */
+                }
+              }
+            }
           }
         }
       }
@@ -526,6 +637,23 @@ void line_follow_control(int16_t base)
     /* ★预算层：真十字触发次数有限（本赛道 = 2 个十字 × 2 次 = 4）→ 第 5 次起一律判为假十字
        （葫芦的假触发），交回 PD 转，不再强制直行。见 app_config.h 的说明与前提。 */
     if (cross_now && (cross_events > CROSS_BUDGET_MAX)) cross_now = 0u;
+#if GOURD_NO_CROSS
+    /* ★★★ 2026-09-24 晚【用户判断】葫芦圈里没有十字路口 ★★★
+       用户原话："葫芦圈里是没有十字路口的，所以当识别到葫芦圈后，
+                 后续判断疑似十字路口的都当葫芦圈处理"
+       圈内出现的"疑似十字"其实是【葫芦圈与外面赛道的连接口(T/Y 型)】，
+       在那里【该顺着线转弯】；强制直行必然冲丢线
+         （日志实证 0924-2323：CROSS #2 IR=11100011 → IR=00000000 ×2），
+       而且很可能把车【送上圈的错方向】→ 之后才开始绕圈。
+       ⇒ 圈内(ge_in_gourd)一律不按十字/宽图案过久处理，
+         两个"直行"分支一起关掉 → 交回普通 PD 循迹（该转就转）。
+       位置说明：放在预算裁剪之后、on_cross 赋值之前，所以两条路都断干净。 */
+    if (ge_in_gourd)
+    {
+      cross_now = 0u;
+      wide_long = 0u;
+    }
+#endif
 #endif
 
 #if CROSS_PRINT
@@ -728,6 +856,39 @@ void line_follow_control(int16_t base)
       }
     }
   }
+
+  /* ★★★ 2026-09-24 IG=0 → 强制清零相切点计数（队友方案第 2 步的后半）★★★
+     为什么：直角弯在圈外也会满足相切点三条判据（实测误报过，且不稳定）。
+     "GW 只在 IG=1 时累计"挡住进门，"IG=0 强制清零"负责出门即清 ——
+     两道一起，圈外误报无论稳不稳定都翻不出浪。
+     ★放在 IG 块的末尾：这一拍的 ge_in_gourd 已经算完，用的是最新值。 */
+#if USE_GOURD_SM
+  /* ★★★ 2026-09-24 晚 修（实车日志证据）★★★
+     原来：IG=0 就【立刻】清零 GW。
+     日志证据：GW 反复走 0→1→2→(被清)→0→1→2，永远到不了 3（GOURD_TOTAL）→
+              出圈永远不触发。原因：ge_in_gourd(IG) 本身在实车上【乱跳】
+              （一秒内 0/1 反复多次，日志里 "GOURD-ENTRY mark set/cleared" 交替出现）。
+     修法：改成"离开确认"—— 连续 GOURD_IG_LEAVE_FRAMES 拍 IG=0 才清。
+           瞬时抖动不再抹掉已经数到的相切点。
+     ★为什么还留着清零：直角弯在圈外的误报必须能被清掉（队友方案的本意），
+       只是不该被"一次抖动"清掉。 */
+  if (ge_in_gourd)
+  {
+    s_ig_leave = 0u;                       /* 还在圈里 → 确认计数复位 */
+  }
+  else if (s_ig_leave < (uint16_t)GOURD_IG_LEAVE_FRAMES)
+  {
+    s_ig_leave++;                          /* 刚出圈，先观察 */
+  }
+  else
+  {
+    gourd_waves    = 0u;                   /* 确认离开了 → 才清 GW */
+    gourd_wrap_evt = 0u;
+    s_wave_odom    = odom_distance_mm();   /* ★同时把"上一个相切点位置"对齐到现在 ——
+                                              这样下一圈的第一个相切点不会被上一圈的
+                                              位置门槛误挡掉 */
+  }
+#endif
 #endif /* USE_GOURD_EXIT || USE_GOURD_LOST_GUARD */
 
   /* ★★★ 葫芦圈【后半段减速】（2026-09-23）
@@ -887,6 +1048,27 @@ void line_follow_control(int16_t base)
       }
 #endif
 
+#if USE_GOURD_SM
+      /* ---- 判据④：相切点计数归 0（= 第 3 个相切点）= 出圈 ★2026-09-24 队友方案第 3 步★
+         GW 只在 IG=1 时累计、IG=0 时强制清零（见相切点检测那一段和 IG 块末尾）——
+         所以圈外（直角弯）的误报"进门不许计、出门即清"，不依赖"误报是否稳定"。
+         第 3 个相切点一到，GW 归 0 → 这一个事件就是出口。
+         ★不直接用 `gourd_waves == 0` 判：发车时它本来就是 0，会一起步就右转。
+
+         ★2026-09-24 晚：本判据已由 GOURD_EXIT_USE_GW 【关掉】——
+           实车验证"仍然走不了葫芦圈"，用户要求改回【里程】判据。
+           GW 的计数与遥测照旧（还能继续观察相切点判据准不准）。
+         ★事件位无论开关都【照样消费】：这样 gourd_wrap_evt 永远是被读的，
+           不会退化成"只写不读"→ ARMCC #550-D 告警（本项目要求 0 警告）。 */
+      if ((trig_now == 0u) && gourd_wrap_evt)
+      {
+#if GOURD_EXIT_USE_GW
+        trig_now       = 4u;
+#endif
+        gourd_wrap_evt = 0u;          /* 消费掉，一次只转一次（关掉时也不留残值） */
+      }
+#endif
+
     }
 
     /* ---- 起转 ---- */
@@ -910,13 +1092,16 @@ void line_follow_control(int16_t base)
       {
         char ev[128];
         (void)snprintf(ev, sizeof(ev),
-          "GOURD-EXIT: trig=%u -> turn RIGHT   ODE=%ldmm  (%s)",
+          "GOURD-EXIT: trig=%u -> turn RIGHT   ODE=%ldmm  yaw=%u GW=%u  (%s)",
           (unsigned)trig_now,
           (long)(odom_distance_mm() - ge_odom_entry),
-          (trig_now == 3u) ? "by MILEAGE"
+          (unsigned)yaw_ok,
+          (unsigned)gourd_waves,
+          (trig_now == 4u) ? "by TANGENT-COUNT (GW wrapped to 0)"
+                           : ((trig_now == 3u) ? "by MILEAGE"
                            : ((trig_now == 2u) ? "in-gourd + lost line"
                                                : (yaw_ok ? "left2 lit, yaw closed loop"
-                                                         : "left2 lit, dist fallback")));
+                                                         : "left2 lit, dist fallback"))));
         telemetry_msg(ev);
       }
     }
@@ -1107,22 +1292,133 @@ void line_follow_control(int16_t base)
     return;
   }
 
+#if GOURD_ARC_FLIP
+  /* ★★★ 2026-09-24 晚【绕圈脱困】同号偏航累计 → 到阈值就反向打舵 ★★★
+     为什么必须靠陀螺、不能靠 IR 图案（这是本轮最重要的结论）：
+       两个【外切】圆在相切点共用一条切线 → 走线 C¹ 连续、只换曲率符号，
+       传感条看到的是一条【普通光滑的线】，不变宽也不分叉
+       —— 日志实证：车在圆上绕了 2 圈（1240mm），一次宽图案都没出现。
+       所以"靠宽图案/咬线找相切点"这条路【在几何上就不成立】。
+     靠陀螺：葫芦圈是 S 形 → 带符号积分左右抵消 ≈0；
+             绕圈是单方向 → 累计到 ±180° 以上。
+             而相切点正好在"同向转够约半圈"处（曲率换号点）。
+     动作：朝【当前误差的反面】打舵 GOURD_ARC_FLIP_MAX 拍，
+           打完积分清零，等下一次同号累计 —— 即"每到半圈换一次向"。
+           方向用误差的反面推出来，所以不依赖陀螺/电机的符号约定。 */
+  {
+    int16_t gz = (int16_t)imu_get_gyro_z();              /* dps */
+    if (!ge_in_gourd)
+    {
+      s_arc_mdeg = 0; s_arc_push = 0; s_arc_dir = 0;     /* 出圈即复位 */
+    }
+    else
+    {
+      if ((gz > GOURD_ARC_DB_DPS) || (gz < -GOURD_ARC_DB_DPS))
+        s_arc_mdeg += (int32_t)gz * 10;                  /* dps×10ms = 0.01° = 10 毫度 */
+      else
+        s_arc_mdeg -= s_arc_mdeg / 16;                   /* 死区内缓慢衰减，抑制零漂 */
+
+      if (s_arc_push)
+      {
+        s_arc_push--;                                    /* 反向打舵中 */
+      }
+      else if ((s_arc_mdeg > (int32_t)GOURD_ARC_FLIP_MDEG) ||
+               (s_arc_mdeg < -(int32_t)GOURD_ARC_FLIP_MDEG))
+      {
+        if (last_error != 0)                             /* 方向 = 当前误差的【反面】 */
+        {
+          s_arc_dir  = (int8_t)((last_error > 0) ? -1 : 1);
+          s_arc_push = (uint8_t)GOURD_ARC_FLIP_MAX;
+          s_arc_mdeg = 0;                                /* 清零，等下一次同号累计 */
+          {
+            char _m[80];
+            (void)snprintf(_m, sizeof(_m), "GOURD-ARC: flip dir=%d OD=%ld GW=%d",
+                           (int)s_arc_dir, (long)odom_distance_mm(), (int)gourd_waves);
+            telemetry_msg(_m);
+          }
+        }
+      }
+    }
+  }
+#endif
+
   /* ---- 真十字: 强制直行（清 last_e，防出十字瞬间 D 项踢一脚）---- */
-  if (on_cross)
+#if WIDE_ONE_GO_STRAIGHT
+  if (s_wo_hold) s_wo_hold--;   /* ★相切点直行窗口按拍递减（本拍仍 >0 就直行）*/
+#endif
+  if (on_cross || s_wo_hold)    /* ★2026-09-25 相切点(只贴一端)也强制直行 */
   {
     e = 0;
     last_e = 0;
   }
-  /* ---- 宽图案持续过久 → 不是十字（葫芦出口/直角入口）→ 接着转 ---- */
+  /* ---- 宽图案持续过久 → 不是十字（葫芦出口/直角入口）→ 该怎么走？ ---- */
   else if (wide_long)
   {
+#if WIDE_LONG_GO_STRAIGHT
+    /* ★★★ 2026-09-24 晚【改成走直线】—— 这是"绕圈"的头号嫌疑 ★★★
+       原来是 e = last_error * 2（沿上次方向【加倍】接着转）。
+       但葫芦圈【内部】的相切点恰恰是"宽图案 + 只贴一端"
+       （日志里 BRANCH #1..#20 一次跑就出现 20 次 —— 这个特征在圈里极其常见），
+       于是车在相切点被命令【加倍往同一个方向转】→ 永远顺着圆走 → 绕圈出不来。
+       ★几何上正确的动作是【直着穿过去】：
+         相切点处走线要从圆 1 跨到圆 2，两个圆的曲率方向相反，
+         只有"先直行、再让 PD 自己去抓下一条线"才能跨过去；
+         继续加倍转 = 必然留在原圆上。
+       ★这与"直角入口该直行"也是一致的（直角入口同样不需要加倍转）。
+       ★牺牲：真正的"葫芦出口该接着转"这个动作交给【出圈右转】专门管
+         —— 而当前右转已被按要求关掉，所以不受影响。
+       想回退：WIDE_LONG_GO_STRAIGHT 改 0。 */
+    e = 0;
+    last_e = 0;      /* 清 D 项，防直行瞬间被微分踢一脚（和 on_cross 一致） */
+#else
     e = (int8_t)(last_error * 2);
 #if USE_GOURD_SM
 #if GOURD_USE_FLIP
     if (gourd_flip) e = (int8_t)(-gourd_dir * GOURD_FLIP_ERR);
 #endif
 #endif
+#endif
   }
+
+#if GOURD_ARC_FLIP
+  /* ---- ★绕圈脱困：反向打舵（放在整条 if/else 链之后，优先级最高）----
+     为什么放在最后：相切点是 C¹ 连续的，IR 那边【看不出任何异常】，
+     上面所有基于图案的判定都不会命中 → 必须由陀螺这条线单独接管。 */
+  if (s_arc_push)
+  {
+    e = (int8_t)(s_arc_dir * (int8_t)GOURD_ARC_FLIP_PUSH);
+    last_e = 0;      /* 清 D 项，防换向瞬间被微分踢一脚 */
+  }
+#endif
+
+  /* ==========================================================================
+   * ★★★ 2026-09-24 晚【已回退，默认关闭】：正常路径上的相切点翻转覆盖 ★★★
+   *
+   *  曾经的原因：翻转覆盖只写在两个分支里
+   *     ① if (r.active == 0)   短暂丢线
+   *     ② else if (wide_long)  宽图案持续过久
+   *  而相切点"线一直都在"、图案是"短暂宽" —— 两个分支都不进，
+   *  于是 gourd_flip 被置了却从没作用到 e 上（实车："抓到窗口但不往外拐"）。
+   *
+   *  ★为什么又关掉（实车 2026-09-24 晚）：接上之后
+   *     "没有效果，而且头左右晃的更厉害了" ——
+   *     · 摆头变厉害：翻转触发门是 ge_in_gourd(IG)，而 IG 本身会误触发
+   *       （GOURD_IG_SUM_TH=1000 是陀螺量纲修好【之前】定的）。
+   *       以前误触发只是 GW 计错一下（无害）；接到正常路径后，
+   *       每次误触发都会给车 15 拍【错误的反向修正】→ 摆头明显加重。
+   *     · 葫芦圈没变化：说明它在【真正的相切点】反而没触发。
+   *   ⇒ 两头都不对 = 触发时机本身不可靠。在这种前提下继续加码只会越修越坏。
+   *
+   *  ★想再试：把 GOURD_FLIP_ON_NORMAL 改 1。但【前提】是先把触发时机做可靠
+   *    （至少要把 IG 的阈值按修正后的陀螺量纲重新标定），否则就是在放大误触发。
+   * ========================================================================== */
+#if USE_GOURD_SM
+#if GOURD_USE_FLIP
+#if GOURD_FLIP_ON_NORMAL
+  if ((!on_cross) && gourd_flip) e = (int8_t)(-gourd_dir * GOURD_FLIP_ERR);
+#endif
+#endif
+#endif
 
   /* ---- PD 差速校正 ---- */
 #if USE_D_FILTER
@@ -1192,6 +1488,25 @@ uint8_t line_follow_on_cross(void)
 uint8_t line_follow_gourd_waves(void)
 {
   return gourd_waves;
+}
+
+/* ★本窗口里"100Hz 漏看了几拍 1kHz 采样"（遥测 K1=）。
+     >0 就说明有东西一闪而过 —— 现在这个数据不只是观测，
+     它背后的 maxraw 位图已经真的参与相切点识别了。
+     ★由 line_follow_control 里的相切点识别处填充（那里调 line_1k_take 取走窗口）。 */
+uint16_t line_follow_1k_missed(void)
+{
+  return s_1k_missed;
+}
+
+/* ★本窗口 1kHz 采样的完整统计（遥测 K1=missed/total 与 MX=maxact/maxraw）。
+     传 NULL 就不取那一项。★必须在 line_follow_control 之后读（它负责填充）。 */
+void line_follow_1k_stats(uint16_t* missed, uint16_t* total, uint8_t* maxact, uint16_t* maxraw)
+{
+  if (missed) *missed = s_1k_missed;
+  if (total)  *total  = s_1k_total;
+  if (maxact) *maxact = s_1k_maxact;
+  if (maxraw) *maxraw = s_1k_maxraw;
 }
 
 uint8_t line_follow_boost_active(void)
@@ -1323,12 +1638,23 @@ void line_follow_init(void)
   wide_cnt    = 0;
   on_cross    = 0;
   wide_long   = 0;
+  s_wo_hold   = 0;   /* ★相切点强制直行窗口 */
+#if GOURD_ARC_FLIP
+  s_arc_mdeg  = 0;   /* ★绕圈脱困：偏航积分/打舵状态 */
+  s_arc_push  = 0;
+  s_arc_dir   = 0;
+#endif
 #if USE_STRAIGHT_BOOST
   straight_cycles = 0;   /* 只在提速开着时才存在（见顶部声明的 #if） */
 #endif
   boost_active = 0;
   gourd_latch  = 0;
   gourd_waves  = 0;
+#if USE_GOURD_SM
+  gourd_wrap_evt = 0;   /* ★出圈事件（跟 gourd_waves 同一个开关，声明/复位/使用同进同出） */
+  s_ig_leave     = 0;   /* ★"离开确认"计数（IG=0 连续多少拍才清 GW） */
+  s_wave_odom    = odom_distance_mm();   /* ★上一个相切点位置（最小间距门槛用） */
+#endif
 #if GOURD_USE_FLIP
   gourd_flip   = 0;
   gourd_dir    = 1;

@@ -122,14 +122,27 @@ void telemetry_report(void)
     ir[i] = (r.raw >> i) & 1u ? '1' : '0';
   ir[LINE_CHANNELS] = '\0';
 
-  uint16_t k1m = line_1k_take(NULL, NULL, NULL);   /* 只留"100Hz 漏看数"当信号灯 */
+  /* ★2026-09-24 晚：改读 line_follow 的缓存，不再直接 line_1k_take ——
+     那个会清零窗口，而相切点识别（100Hz）已经取走了 maxact/maxraw，
+     遥测只有 20Hz，直接取几乎总是拿到空窗口。 */
+  uint16_t k1m = 0u;
+  line_follow_1k_stats(&k1m, NULL, NULL, NULL);   /* 只留"100Hz 漏看数"当信号灯 */
 
-  char buf[96];
+  char buf[112];
   int n = snprintf(buf, sizeof(buf),
-    "FW:%s ST=%d IR:%s RPM1=%d RPM2=%d OD=%ld GZ=%d K1=%d\r\n",
+    /* ★2026-09-24 加 GW= 与 IG= —— 必须加，否则出圈判据没法验证：
+       带 GW/IG 的完整长行要靠发 `H` 命令取，而本车【PC→车 RX 不通】，
+       发不了命令 → 队友方案第 4 步"葫芦里 GW 应 1→2→0、直角弯一直是 0"
+       根本无从检查。把这两个塞进默认短行，插上串口就能直接看。
+       GW = 相切点计数（0..GOURD_TOTAL）：葫芦里应该 1→2→0 然后右转；
+            直角弯必须一直是 0（这正是判据成败的验收线）。
+       IG = 是否在葫芦圈里：只在 IG=1 时 GW 才累计，IG=0 会把 GW 强制清零。
+       行长从 ~67 增到 ~78 字符，仍在 80 列内。 */
+    "FW:%s ST=%d IR:%s RPM1=%d RPM2=%d OD=%ld GZ=%d GW=%d IG=%d K1=%d\r\n",
     FW_TAG, (int)car_fsm_state(), ir,
     speed_get_rpm(MOTOR_LEFT), speed_get_rpm(MOTOR_RIGHT),
-    (long)odom_distance_mm(), (int)imu_get_gyro_z(), (int)k1m);
+    (long)odom_distance_mm(), (int)imu_get_gyro_z(),
+    (int)line_follow_gourd_waves(), (int)line_follow_in_gourd(), (int)k1m);
   if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)n, 100);
 }
 
@@ -146,12 +159,15 @@ void telemetry_print_full(void)
     ir[i] = (r.raw >> i) & 1u ? '1' : '0';
   ir[LINE_CHANNELS] = '\0';
 
-  /* ★1kHz 采样统计（本窗口，读一次清一次）—— 量化"100Hz 漏掉了多少瞬间"
+  /* ★1kHz 采样统计（本窗口）—— 量化"100Hz 漏掉了多少瞬间"
      K1 = missed/total（与主循环读数不同的 1kHz 样本 / 总样本）
-     MX = 本窗口出现过的最宽图案（路数/位图）—— 一闪而过的宽图案会在这里现形 */
+     MX = 本窗口出现过的最宽图案（路数/位图）—— 一闪而过的宽图案会在这里现形
+     ★2026-09-24 晚：改读 line_follow 的缓存，不再直接 line_1k_take
+       （那个会清零窗口，而相切点识别 100Hz 已经取走了 maxact/maxraw）。 */
   uint16_t k1_total = 0u, k1_maxraw = 0u;
   uint8_t  k1_maxact = 0u;
-  uint16_t k1_missed = line_1k_take(&k1_total, &k1_maxact, &k1_maxraw);
+  uint16_t k1_missed = 0u;
+  line_follow_1k_stats(&k1_missed, &k1_total, &k1_maxact, &k1_maxraw);
   char mx[LINE_CHANNELS + 1];
   for (uint8_t i = 0; i < LINE_CHANNELS; i++)
     mx[i] = (k1_maxraw >> i) & 1u ? '1' : '0';
