@@ -174,7 +174,7 @@
 
 /* ★ 固件版本标签：每行遥测都带着它 → 一眼确认"烧没烧、烧的是哪版"
    改完代码请更新（格式 MMDD-HHMM），开机横幅里还会打印编译时间(__DATE__/__TIME__)作双重确认 */
-#define FW_TAG               "0925-2101"
+#define FW_TAG               "0925-2155"
 
 /* 丢线找线参数 */
 #define LOST_SPIN_DELAY      2           /* 丢线后先沿原方向修正的周期数 */
@@ -452,6 +452,14 @@
    用 GOURD_ENTRY_CLEAR_FRAMES / GOURD_ENTRY_MARK_TTL，原值不动）。 */
 #define GOURD_EXIT_STRAIGHT_FRAMES 100   /* GW数满后 连续"普通线"100拍(=1秒) → 确认出圈 */
 #define GOURD_IG_FAILSAFE_FRAMES   3000  /* IG=1 持续3000拍(=30秒) 强制清 —— 兜底, 正常过葫芦~10秒用不到 */
+
+/* ★★★ 2026-09-25 CARD-004：切点行驶状态机 + 出口右转（修订版卡为准）★★★
+   切点"进→出"两步：TANGENT 确认=进(GW 奇数++)；宽图案结束=出(GW 偶数++ + 转向窗口)。
+   出口判据 NOFLIP：宽贴一端 + 候选期满未翻号 + 期内未全灭 + ge_done（与切点天然互斥）。 */
+#define GOURD_TANOUT_CONFIRM   2    /* "宽图案结束"确认拍数：连续2拍 active<CROSS_ACTIVE_MIN */
+#define GOURD_TANOUT_TIMEOUT   30   /* pending 悬空兜底：30拍(300ms)未见宽结束→放弃不++ */
+#define GOURD_EXIT_USE_NOFLIP  1    /* 出口判据：宽贴一端+候选期满未翻号+未全灭+ge_done */
+#define GOURD_SLOW_AFTER_DONE  1    /* ge_done 后减速(GOURD_SLOW_PCT)，备出口转向 */
 
 /* ★★★ 葫芦圈内【屏蔽丢线兜底】（2026-09-23 新增）★★★
    问题（用户实测）："过葫芦圈的时候防丢线机制经常干扰小车的运动，
@@ -935,7 +943,7 @@
         累计 3 次 = 绕完 4 个圆 → 退出。认不出来就照常循迹（兜底不变）。 */
 #define USE_GOURD_SM         1
 #define GOURD_EDGE_WINDOW    3           /* 最外路亮之后, 多少拍内扩散算一次波 */
-#define GOURD_TOTAL          3           /* 相切点个数（4 个外切圆 → 3 个） */
+#define GOURD_TOTAL          6           /* ★2026-09-25 CARD-004：3→6 每切点计2(进+出)，4圆3切点×2 */
 #define GOURD_FLIP_CYCLES    15          /* 检测到相切点后, "翻转修正"保持的拍数 */
 #define GOURD_FLIP_ERR       3           /* 翻转修正用的误差幅度 */
 /* ★2026-09-22 按实测数据定：车靠通用 PD 就正确进了下一个圆 → "翻转转向"默认关掉

@@ -205,6 +205,15 @@ static uint8_t  ge_confirmed = 0;  /* 本次进圈后已数到过>=1个相切点
 static uint8_t  ge_done      = 0;  /* GW 已归零(相切点全部过完) */
 static uint16_t ge_straight  = 0;  /* ge_done 后的连续普通线拍数 */
 static uint16_t ge_stay      = 0;  /* IG=1 持续拍数(兜底用) */
+/* ★2026-09-25 CARD-004：切点行驶状态机 + 出口右转（照 gourd_wrap_evt 模式：声明/复位/使用同进同出） */
+static uint8_t  s_tan_pending = 0;  /* TANGENT 后等待"出切点"的锁存位 */
+static uint8_t  s_gap_cnt     = 0;  /* 宽结束连续拍数计数 */
+static uint8_t  s_tan_timeout = 0;  /* pending 悬空计时 */
+static uint8_t  s_tan_index   = 0;  /* 切点序号 1..3（仅用于转向方向交替） */
+static uint8_t  s_cand_side   = 0;  /* 候选起时贴哪端 'L'/'R'（tL/tR 是块内局部量，另存一份供打印） */
+static uint8_t  s_cand_lost   = 0;  /* 本次候选期内出现过全灭 */
+static uint8_t  gourd_exit_noflip_evt = 0;  /* 出口事件位（NOFLIP 判据） */
+static uint8_t  ge_exit_done  = 0;  /* 出口转向已完成（Path①' 的前置） */
 #if USE_GOURD_SLOWDOWN
 static uint16_t ge_frames   = 0;    /* ★进圈后经过的拍数（后半段减速用） */
 #endif
@@ -361,7 +370,7 @@ void line_follow_control(int16_t base)
       if (cand_win)                                /* 候选期内验收 */
       {
         cand_win--;
-        if (r.active == 0u) { cand_win = 0u; cand_ok = 0u; }    /* ★③ 全灭 → 作废 */
+        if (r.active == 0u) { cand_win = 0u; cand_ok = 0u; s_cand_lost = 1u; }    /* ★③ 全灭 → 作废（★CARD-004：记"期内全灭"，出口 NOFLIP 判据用） */
         else
         {
           if (flip_win) cand_ok = 1u;
@@ -375,7 +384,7 @@ void line_follow_control(int16_t base)
                  圈外误报 -> 进门即清，绕完一圈回到 0 也清 -> 不依赖"误报是否稳定"。
                ★这里用的 ge_in_gourd 是【上一拍】的值（IG 块在本函数后面才更新），
                  差 1 拍 = 10ms，相对一圈几秒可忽略。 */
-            if (ge_in_gourd && (gourd_waves < 200u))
+            if (ge_in_gourd && !ge_done && (gourd_waves < 200u))   /* ★CARD-004：ge_done=1 后冻结计数（防第四圆/出口区再数） */
             {
               /* ★★★ 2026-09-24 晚：相切点必须【彼此隔开】才算数（实车日志驱动）★★★
                  日志证据：OD=864 记 GW=1、OD=913 记 GW=2 —— 只隔 47mm！
@@ -403,44 +412,104 @@ void line_follow_control(int16_t base)
                      出现几次 = 有几个相切点被确认；一行都没有 = 判据没成立。 */
                   char _m[80];
                   (void)snprintf(_m, sizeof(_m),
-                                 "GOURD-TANGENT: straight %d fr (OD=%ld GW=%d)",
-                                 (int)WIDE_ONE_HOLD_FRAMES, (long)odom_distance_mm(), (int)gourd_waves);
+                                 "GOURD-TANGENT: OD=%ld GW=%d side=%c",
+                                 (long)odom_distance_mm(), (int)gourd_waves, (int)s_cand_side);
                   telemetry_msg(_m);
                 }
 #endif
 #if GOURD_USE_FLIP
-              /* ★★★ 2026-09-24 翻转修正【也必须在这道门里】★★★
-                 实车病根：车进了葫芦圈就【锁在第 1 个圆上绕两圈】——
-                 因为相切点处走线要从圆 1 跨到圆 2，而圆 2 的曲率方向与圆 1 相反，
-                 PD 只顺着最强的那条线走 → 永远绕同一个圆。
-                 翻转修正就是治它的：命中相切点后强制把误差取反 15 拍，
-                 让车头【拐向另一个圆】。
-                 ⚠️ 但它一旦在圈外命中（直角弯），会让车在那儿突然反向修正 →
-                    直接把直角弯走废。所以必须跟着 ge_in_gourd 走。 */
-              gourd_dir  = (last_error >= 0) ? 1 : -1;   /* 进相切点前的误差方向 */
-              gourd_flip = GOURD_FLIP_CYCLES;            /* 反向修正保持的拍数 */
+              /* ★★★ 2026-09-25 CARD-004：翻转修正的【方向与起点】移到"出切点"(TANOUT)事件 ★★★
+                 旧版在这里按"进相切点前的误差方向"立刻给 15 拍反向修正 —— 已删除。
+                 方向改为按切点序号交替（1左2右3左），窗口从宽图案结束那一拍起算，
+                 见本块后面的 "GOURD-TANOUT" 事件块。 */
 #endif
                 s_wave_odom = odom_distance_mm();        /* 记下本次相切点的位置 */
                 ge_confirmed = 1u;                      /* ★CARD-003：葫芦坐实（数到过>=1个相切点） */
-                gourd_waves++;
-                if (gourd_waves >= GOURD_TOTAL)
-                {
-                  gourd_waves    = 0;   /* 归 0 = 第 3 个相切点 = 绕完 4 个圆 */
-                  gourd_wrap_evt = 1u;  /* ★置出圈事件（由出圈触发块消费） */
-                  ge_done        = 1u;  /* ★CARD-003：相切点全部过完 */
-                }
+                gourd_waves++;                          /* ★CARD-004：奇数++ = 进切点 */
+                s_tan_pending = 1u;                     /* ★CARD-004：锁存，等"出切点"事件 */
+                s_gap_cnt     = 0u;
+                s_tan_timeout = 0u;
+                /* ★CARD-004：GW 到 GOURD_TOTAL(6) 的归零+wrap_evt+ge_done 已搬到
+                   "出切点"事件块（第 6 次 ++ 只可能发生在那里，全工程只此一处执行） */
               }
             }
+          }
+          else if ((cand_win == 0u) && !cand_ok && !s_cand_lost && ge_done && !ge_exit_done)
+          {
+            /* ★CARD-004：出口候选【干净退出】—— 候选期满、未翻号、期内未全灭、
+               且已过完 3 切点(ge_done)、还没转过弯 → 这就是出口（与切点天然互斥：
+               切点必翻号+必全灭，出口两者皆无）。只置事件位，由出圈触发块消费。 */
+            gourd_exit_noflip_evt = 1u;
           }
         }
       }
       else if (wide_one && !gourd_latch)           /* ★① 起候选 */
       {
         cand_win = 6u; cand_ok = 0u;
+        s_cand_lost = 0u;                          /* ★CARD-004：新候选期，清"期内全灭"记录 */
+        s_cand_side = (uint8_t)(((r.raw & 1u) != 0u) ? 'L' : 'R');   /* ★贴哪端(bit0=最左)，TANGENT 打印用 */
       }
       else if (!wide_one)
       {
         gourd_latch = 0u;
+      }
+    }
+
+    /* ---- ★2026-09-25 CARD-004："出切点"事件（TANOUT）----
+       TANGENT 确认只是"进切点"（GW 奇数++）；宽图案结束才是"出切点"（GW 偶数++）。
+       为什么必须分开：run4 首过 3 切点是单打三连，"出"没有第二次 TANGENT 可等；
+       而宽结束后 active 跌破 CROSS_ACTIVE_MIN 连续 2 拍稳定可见，是可靠的"出"标志。
+       转向窗口从【出切点】起算（旧版从 TANGENT 起算，已删）：
+         序号奇(1,3)→左转 / 偶(2)→右转，GOURD_FLIP_CYCLES 拍 × GOURD_FLIP_ERR。
+       ★负号陷阱：三处消费点都是 e = -gourd_dir * GOURD_FLIP_ERR，
+         所以 左转(e<0) ⇒ gourd_dir=+1，右转(e>0) ⇒ gourd_dir=-1。 */
+    if (s_tan_pending)
+    {
+      if (r.active < (uint8_t)CROSS_ACTIVE_MIN)      /* 宽图案已结束 */
+      {
+        if (s_gap_cnt < 250u) s_gap_cnt++;
+        if (s_gap_cnt >= (uint8_t)GOURD_TANOUT_CONFIRM)
+        {
+          s_tan_pending = 0u;  s_gap_cnt = 0u;  s_tan_timeout = 0u;
+          if (gourd_waves < 200u) gourd_waves++;         /* 偶数++（出切点） */
+          s_tan_index++;
+#if GOURD_USE_FLIP
+          gourd_dir  = (int8_t)(((s_tan_index & 1u) != 0u) ? 1 : -1);
+          gourd_flip = (uint8_t)GOURD_FLIP_CYCLES;       /* 转向窗口从出切点起算 */
+#endif
+          /* ★GW 到 GOURD_TOTAL(6) 的归零 + wrap_evt + ge_done —— 全工程【只此一处】
+             （第 6 次 ++ 只可能发生在本块；TANGENT 块内的旧归零代码已删） */
+          if (gourd_waves >= (uint8_t)GOURD_TOTAL)
+          {
+            gourd_waves    = 0u;
+            gourd_wrap_evt = 1u;
+            ge_done        = 1u;
+          }
+          {
+            char _m[80];
+            (void)snprintf(_m, sizeof(_m),
+                           "GOURD-TANOUT: idx=%d dir=%s OD=%ld GW=%d",
+                           (int)s_tan_index, ((s_tan_index & 1u) != 0u) ? "L" : "R",
+                           (long)odom_distance_mm(), (int)gourd_waves);
+            telemetry_msg(_m);
+          }
+        }
+      }
+      else
+      {
+        s_gap_cnt = 0u;
+        if (s_tan_timeout < 250u) s_tan_timeout++;
+        if (s_tan_timeout >= (uint8_t)GOURD_TANOUT_TIMEOUT)  /* 兜底：宽迟迟不结束 → 放弃，不++ */
+        {
+          s_tan_pending = 0u;  s_tan_timeout = 0u;
+          {
+            char _m[80];
+            (void)snprintf(_m, sizeof(_m),
+                           "GOURD-TANOUT: timeout (OD=%ld GW=%d)",
+                           (long)odom_distance_mm(), (int)gourd_waves);
+            telemetry_msg(_m);
+          }
+        }
       }
     }
   }
@@ -587,6 +656,14 @@ void line_follow_control(int16_t base)
   else
   {
     sp = sp_straight;                 /* 直道 */
+  }
+#endif
+
+#if GOURD_SLOW_AFTER_DONE
+  /* ★CARD-004：过完 3 切点(GW 归零 ge_done=1) 且出口还没转 → 减速 65%，备出口转向 */
+  if (ge_done && !ge_exit_done)
+  {
+    sp = (int16_t)((sp * GOURD_SLOW_PCT) / 100);
   }
 #endif
 
@@ -859,6 +936,13 @@ void line_follow_control(int16_t base)
         ge_done      = 0u;
         ge_straight  = 0u;
         ge_stay      = 0u;
+        s_tan_pending = 0u;                          /* ★CARD-004：IG 清 0 同清切点状态机/出口变量 */
+        s_gap_cnt     = 0u;
+        s_tan_timeout = 0u;
+        s_tan_index   = 0u;
+        s_cand_lost   = 0u;
+        gourd_exit_noflip_evt = 0u;
+        ge_exit_done  = 0u;
 #if GOURD_EXIT_ONE_SHOT
         /* ★解锁时机：同上 —— 从起步起算时这里也不解锁（会无限重复右转）。 */
 #if !(USE_GOURD_EXIT_ODOM && GOURD_EXIT_ODOM_FROM_START)
@@ -875,9 +959,10 @@ void line_follow_control(int16_t base)
     {
       if (ge_stay < 60000u) ge_stay++;
 
-      /* 【Path①】正常出圈：GW 数满后，连续普通线 GOURD_EXIT_STRAIGHT_FRAMES 拍。
+      /* 【Path①'】正常出圈：GW 数满【且出口已转完】后，连续普通线 GOURD_EXIT_STRAIGHT_FRAMES 拍。
+         ★CARD-004：出口没转完 ge_straight 不累计（实测"GW 归零后圈内有连续 100 拍普通线"会提前清）。
          直角弯图案不是普通线（ge_is_plain_line 返回 0）→ ge_straight 天然清零。 */
-      if (ge_done)
+      if (ge_done && ge_exit_done)
       {
         if (ge_is_plain_line(r.raw)) ge_straight++;
         else                         ge_straight = 0u;
@@ -890,6 +975,13 @@ void line_follow_control(int16_t base)
           ge_done      = 0u;
           ge_straight  = 0u;
           ge_stay      = 0u;
+          s_tan_pending = 0u;                        /* ★CARD-004：IG 清 0 同清切点状态机/出口变量 */
+          s_gap_cnt     = 0u;
+          s_tan_timeout = 0u;
+          s_tan_index   = 0u;
+          s_cand_lost   = 0u;
+          gourd_exit_noflip_evt = 0u;
+          ge_exit_done  = 0u;
 #if GOURD_EXIT_ONE_SHOT
 #if !(USE_GOURD_EXIT_ODOM && GOURD_EXIT_ODOM_FROM_START)
           ge_fired = 0u;
@@ -909,6 +1001,13 @@ void line_follow_control(int16_t base)
         ge_done      = 0u;
         ge_straight  = 0u;
         ge_stay      = 0u;
+        s_tan_pending = 0u;                          /* ★CARD-004：IG 清 0 同清切点状态机/出口变量 */
+        s_gap_cnt     = 0u;
+        s_tan_timeout = 0u;
+        s_tan_index   = 0u;
+        s_cand_lost   = 0u;
+        gourd_exit_noflip_evt = 0u;
+        ge_exit_done  = 0u;
 #if GOURD_EXIT_ONE_SHOT
 #if !(USE_GOURD_EXIT_ODOM && GOURD_EXIT_ODOM_FROM_START)
         ge_fired = 0u;
@@ -949,6 +1048,13 @@ void line_follow_control(int16_t base)
     ge_confirmed   = 0u;                   /* ★CARD-003：清 GW 同处同清（IG 早已清过，保险再清） */
     ge_done        = 0u;
     ge_straight    = 0u;
+    s_tan_pending  = 0u;                   /* ★CARD-004：同处同清切点状态机/出口变量 */
+    s_gap_cnt      = 0u;
+    s_tan_timeout  = 0u;
+    s_tan_index    = 0u;
+    s_cand_lost    = 0u;
+    gourd_exit_noflip_evt = 0u;
+    ge_exit_done   = 0u;
     s_wave_odom    = odom_distance_mm();   /* ★同时把"上一个相切点位置"对齐到现在 ——
                                               这样下一圈的第一个相切点不会被上一圈的
                                               位置门槛误挡掉 */
@@ -1134,6 +1240,16 @@ void line_follow_control(int16_t base)
       }
 #endif
 
+#if GOURD_EXIT_USE_NOFLIP
+      /* ---- 判据⑤：出口 NOFLIP（宽贴一端 + 候选期满未翻号 + 期内未全灭 + ge_done）
+             ★2026-09-25 CARD-004：与切点天然互斥（切点必翻号+必全灭，出口两者皆无） */
+      if ((trig_now == 0u) && gourd_exit_noflip_evt)
+      {
+        trig_now = 5u;
+        gourd_exit_noflip_evt = 0u;
+      }
+#endif
+
     }
 
     /* ---- 起转 ---- */
@@ -1162,11 +1278,12 @@ void line_follow_control(int16_t base)
           (long)(odom_distance_mm() - ge_odom_entry),
           (unsigned)yaw_ok,
           (unsigned)gourd_waves,
-          (trig_now == 4u) ? "by TANGENT-COUNT (GW wrapped to 0)"
+          (trig_now == 5u) ? "by NOFLIP-WIDE (exit, no flip)"
+                           : ((trig_now == 4u) ? "by TANGENT-COUNT (GW wrapped to 0)"
                            : ((trig_now == 3u) ? "by MILEAGE"
                            : ((trig_now == 2u) ? "in-gourd + lost line"
                                                : (yaw_ok ? "left2 lit, yaw closed loop"
-                                                         : "left2 lit, dist fallback"))));
+                                                         : "left2 lit, dist fallback")))));
         telemetry_msg(ev);
       }
     }
@@ -1210,6 +1327,7 @@ void line_follow_control(int16_t base)
           ge_turning = 0u;
           ge_settle  = (uint16_t)GOURD_EXIT_SETTLE_FRAMES;   /* ★转完先停一停再走 */
           ge_last_deg = deg_abs;
+          ge_exit_done = 1u;          /* ★CARD-004：出口转向完成 → Path①' 前置满足 */
           snprintf(msg, sizeof(msg), "GOURD-EXIT done: deg=%.1f dist=%lu frames=%u",
                    (double)deg_abs, (unsigned long)ge_turn_dist, (unsigned)ge_turn_frames);
           telemetry_msg(msg);
@@ -1763,6 +1881,14 @@ void line_follow_init(void)
   ge_done       = 0;
   ge_straight   = 0;
   ge_stay       = 0;
+  s_tan_pending = 0;   /* ★CARD-004：切点状态机/出口变量同处复位 */
+  s_gap_cnt     = 0;
+  s_tan_timeout = 0;
+  s_tan_index   = 0;
+  s_cand_side   = 0;
+  s_cand_lost   = 0;
+  gourd_exit_noflip_evt = 0;
+  ge_exit_done  = 0;
 #if USE_GOURD_SLOWDOWN
   ge_frames     = 0;
 #endif
