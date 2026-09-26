@@ -142,6 +142,15 @@ uint8_t car_fsm_emg_cause(void)
 /* 每控制周期调用（app_loop 里 10ms 一次；单电机测试模式时 app 层会跳过本函数） */
 void car_fsm_run(uint32_t dt_ms)
 {
+  /* ★★★ 2026-09-26 晚【自动跑计时器】—— 用户要求 ★★★
+     用户原话："你给小车设定成自动跑8秒就停吧，因为后面小车在跑，我要按住它。
+               就导致他后面就停（或者跑得更慢）了，影响判断"
+     ⇒ 以前为了不让车冲出去，用户要在后面按住它 —— 一按，轮子被拖住/转速掉下来，
+       【后面那段数据就全废了】（前面已经吃过两次亏：G62 结尾、G66 结尾）。
+     现在改成"跑够 AUTO_RUN_MS 自己停"，用户就不用按了，整趟数据都有效。
+     ★计时用 dt_ms 累加（不是时间戳差），与状态机的节拍一致；
+       在 CAR_COUNTDOWN 结束时清零（见下面 odom_reset() 那一段）。 */
+  static uint32_t s_run_ms = 0u;
   uint32_t now = HAL_GetTick();
   (void)dt_ms;
 
@@ -232,6 +241,7 @@ void car_fsm_run(uint32_t dt_ms)
     if (step >= CD_STEPS)
     {
       odom_reset();            /* ★起步瞬间清零: 之后 OD= 就是从起点算起的里程 */
+      s_run_ms = 0u;           /* ★自动跑计时也在这里清零（每一趟重新开始计时） */
       /* ★★★ 新的一趟：给"出圈右转"重新上膛（2026-09-23 加）★★★
          从起步起算的里程判据（GOURD_EXIT_ODOM_FROM_START=1）是
          "里程 >= 阈值"，一旦成立就永远成立，所以：
@@ -250,6 +260,20 @@ void car_fsm_run(uint32_t dt_ms)
     /* LED2: 丢线指示（原有行为，不动） */
     if (line_follow_is_lost()) led_set(LED_ID_2, (uint8_t)((now / 100u) & 1u));
     else                       led_set(LED_ID_2, 0);
+
+    /* ★★★ 2026-09-26 晚【跑够 AUTO_RUN_MS 就自己停】—— 见 car_fsm_run 开头的说明 ★★★
+       为什么放在 line_follow_control() 【之前】：到点这一拍就不再下发控制量，
+       直接走 car_fsm_finish() → motor_stop()，避免"先算一拍再停"多跑 10ms。
+       AUTO_RUN_MS = 0 表示关闭（行为 = 0926-G71，需长按才停）。 */
+    if (AUTO_RUN_MS > 0)
+    {
+      s_run_ms += dt_ms;
+      if (s_run_ms >= (uint32_t)AUTO_RUN_MS)
+      {
+        car_fsm_finish();      /* 内部 motor_stop() + enter(CAR_STOPPED) + 打 STOP 行 */
+        break;
+      }
+    }
 
     line_follow_control(base_speed);
 

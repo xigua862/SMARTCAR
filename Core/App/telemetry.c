@@ -44,7 +44,7 @@ static volatile uint8_t  cmd_ready = 0;
  *   生成破坏工程"的前车之鉴），而 TXE 中断只改这一个文件的寄存器操作，风险小得多。
  *   CPU 开销：115200 下每字符一次中断 ≈ 87µs 一次，可忽略。
  * ==========================================================================*/
-#define TXBUF_SIZE   8192u              /* 要能装下黑匣子一次回放的一批行
+#define TXBUF_SIZE   10240u             /* ★★8192 → 10240（实测 8192 刚好装不下回放）★★
                                            ★2026-09-26 晚 4096 → 8192：
                                              实测一次回放 ≈27KB，4KB 只能装 15% →
                                              输出被截断成 "T072 PWT073 PWT074 PW0T075…"
@@ -249,7 +249,20 @@ void telemetry_trace_dump(void)
     if (n > 0) tx_send((const uint8_t*)b, (uint16_t)n);
     i = (uint16_t)((i + 1u) % (uint16_t)TRACE_N);
   }
-  telemetry_msg("--- TRACE end ---");
+  /* ★★2026-09-27【把丢弃计数打出来】★★
+     为什么必须打：tx_send 在缓冲满时是【逐字节静默丢弃】的，
+     丢了以后行会被切断、粘在一起（"T111 ... sp=24T112"这种），
+     而《丢弃》这件事本身【没有任何痕迹】—— 我因此误判过好几次
+     "黑匣子记漏了"，其实是被串口丢了。
+     ⇒ 这一行是"这次回放到底有没有丢"的唯一定论：
+          tx_drop=0        → 完整
+          tx_drop 不为 0   → 尾部不可信，别拿它下结论
+     ★若长期不为 0：把 TXBUF_SIZE 再加大（RAM 够），或减少 TRACE_N。 */
+  {
+    char eb[48];
+    (void)snprintf(eb, sizeof(eb), "--- TRACE end (tx_drop=%u) ---", (unsigned)tx_drop);
+    telemetry_msg(eb);
+  }
 }
 
 /* ★2026-09-24：默认遥测改成【短核心行】（≈67 字符 → 80 列终端不再折行）。
@@ -308,6 +321,85 @@ void telemetry_report(void)
     (int)line_follow_in_gourd(),
     (long)line_follow_arc_mdeg(), (unsigned)line_follow_arc_trigs());
   if (n > 0) tx_send((const uint8_t*)buf, (uint16_t)n);
+
+  /* ★★★ 2026-09-26 晚【新增：MPU6050 六轴原始量 + 角度】—— 用户要求 ★★★
+     用户原话："你可以加一下 mpu6050 和角度数据，我感觉小车走的时候污染有点严重"。
+     动机：近几趟日志里陀螺出现两种"死法"（GZ 恒 -15 卡住 / GZ 恒 0 全程），
+           而 |GZ| 又常被怀疑削顶（±1000dps 档，|GZ|>=990 占 7.4%）。
+           只看 GZ 一个数分不清"芯片死了 / 削顶 / 真的在抖"，
+           必须看六轴原始量才判得出来。
+     【为什么另开两条短行，而不是塞进上面那行】
+       上面那行已经约 95 字符，是本串口能稳定送出的上限（尾部字段实测会被吃掉）。
+       再挂长字段必然丢数据。所以按 200ms 的慢节奏单独发两行，每行 ≤45 字符。
+     【格式】
+       IMUa  ax ay az | gx gy gz   ← 六轴原始 LSB
+             加速度计 ±8g  → 4096 LSB/g    （静止平放：az≈+4096，ax≈ay≈0）
+             陀螺     ±1000dps → 32.8 LSB/(°/s)（静止：三轴 ≈ 0，越小越干净）
+       IMUp  pitch roll yaw gz_dps ← 角度(度) + 偏航角速度(°/s)
+             pitch/roll 是【只用加速度计算、不滤波】的 ⇒ 它抖 = 车真的在抖
+             yaw 是陀螺积分值（imu_update 里用实测 dt 积的）
+     【怎么看"污染"】
+       · 车静止时 az 应在 ±4096 附近小幅波动；行车时 az 乱跳 = 震动传到 IMU
+       · 陀螺三轴静止应接近 0；行车时 gx/gy 乱跳 = 颠簸/电源噪声
+       · 若六轴全是 0 → IMU 读不到（I2C 挂了），不是"干净"
+       · pitch/roll 幅度大 = 车身在俯仰/侧倾；这两项最能反映循迹是否在抖
+     【回退】删掉本块即可（只加打印，不动任何控制量）。 */
+#if IMU_TELEM_ON
+  {
+    static uint8_t s_imu_div = 0u;
+    if (++s_imu_div >= 4u)               /* 4 × 50ms = 200ms */
+    {
+      int16_t ia[3];
+      int16_t ig[3];
+      char    ib[72];
+
+      s_imu_div = 0u;
+      imu_get_raw(ia, ig);
+
+      (void)snprintf(ib, sizeof(ib), "IMUa %6d %6d %6d | %6d %6d %6d\r\n",
+                     (int)ia[0], (int)ia[1], (int)ia[2],
+                     (int)ig[0], (int)ig[1], (int)ig[2]);
+      telemetry_msg(ib);
+
+      /* ★★★ 2026-09-26 晚【滤波后的数据 + 污染度量】—— 用户要求 ★★★
+         用户原话："我要看的是滤波以后那些数据的污染值严不严重，
+                   看它对小车的不良影响程度"。
+         ⇒ 原始量只能证明"有污染"，回答不了"影响多大"。
+           所以这里打【滤波后】的六轴 + 两个"污染有多大"的直接读数：
+             Na = 平均|原始 − 滤波|（加速度三轴平均, LSB）= 被滤掉了多少
+             Ng = 同上（陀螺三轴平均, LSB）
+             P/R= 用【滤波后】加速度算的角度(度)
+                  ⇒ **它抖多少 = 滤波后还剩多少 = 对车的实际影响**
+         低通是 100Hz 一阶 IIR（系数 IMU_LPF_ALPHA_X100），
+         统计窗口 = 本行两次打印之间（200ms / 20 个采样），读后自动清零。
+         【怎么判"严重不严重"】
+           · az 静止应 ≈ 4096（1g）；滤波后 P/R 静止应 ≈ 0 且很稳
+           · 若 Na 很大（几百以上）而 P/R 仍然很稳 → 污染被滤掉了，影响不大
+           · 若 Na 大 **且** P/R 还在 ±10° 以上乱摆 → 污染穿透了滤波，真的在害车
+           · 若 Na 和 P/R 都小，但车还是走不好 → 问题不在 IMU，别在它身上花时间 */
+      {
+        int16_t ffa[3];
+        int16_t ffg[3];
+        int16_t na = 0;
+        int16_t ng = 0;
+        float   fp = 0.0f;
+        float   fr = 0.0f;
+
+        imu_get_filtered(ffa, ffg, &na, &ng, &fp, &fr);
+
+        (void)snprintf(ib, sizeof(ib), "IMUf %6d %6d %6d | %6d %6d %6d\r\n",
+                       (int)ffa[0], (int)ffa[1], (int)ffa[2],
+                       (int)ffg[0], (int)ffg[1], (int)ffg[2]);
+        telemetry_msg(ib);
+
+        (void)snprintf(ib, sizeof(ib), "IMUn Na=%5d Ng=%5d P=%+4d R=%+4d Y=%+6d C=%02X\r\n",
+                       (int)na, (int)ng, (int)fp, (int)fr, (int)imu_get_yaw(),
+                       (unsigned)imu_get_cfg());
+        telemetry_msg(ib);
+      }
+    }
+  }
+#endif /* IMU_TELEM_ON */
 }
 
 /* ★完整长行（所有细节）—— 由 `H` 指令按需打印, 不再每拍刷屏。 */

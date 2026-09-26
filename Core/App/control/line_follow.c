@@ -251,6 +251,13 @@ static const uint16_t kGourdEntryPat[4] = { 0x0067u, 0x004Du, 0x004Fu, 0x0073u }
 /* 说明：0x67=11100110  0x4D=10110010  0x4F=11110010  0x73=11001110（bit0=最左） */
 
 static uint8_t  ge_in_gourd = 0;    /* 1 = 已打上"进过圈"印记 */
+/* ★★★ 2026-09-26 晚【观察窗】：IG 判据的"原始结论"，仅在 GOURD_CTRL_DISABLE=1 时存在。
+   ge_in_gourd = 【控制闸门】（所有圈内特殊控制都看它）
+   ge_ig_view  = 【观察值】  （只给遥测 IG 字段和黑匣子 f 位用）
+   ★开关关闭时整块编译掉 ⇒ 源码与行为都完全等价于 0926-G60。 */
+#if GOURD_CTRL_DISABLE
+static uint8_t  ge_ig_view  = 0;
+#endif
 static uint16_t ge_mark_ttl = 0;    /* 印记剩余存活拍数（只当保险） */
 static uint8_t  ge_fired    = 0;    /* ★1 = 本次进圈【已经】出圈转过一次了（一次性锁存） */
 static uint16_t ge_plain_cnt = 0;   /* ★连续多少拍是"普通线"（用于判定离开葫芦圈） */
@@ -966,6 +973,32 @@ void line_follow_control(int16_t base)
 #endif
     if (ge_is_entry_pattern(r.raw)) ig_now = 1u;   /* ② 图案保底（或作对照） */
 
+    /* ★★★ 2026-09-26 晚【把"观察"和"控制"拆开】★★★
+     *
+     * 【为什么加】用户要求："把 IG=1 之后的控制关了，我看看。"
+     *   动机有硬证据支撑 —— FW:0926-G40 第一趟【陀螺仪全程死在 GZ=-15】，
+     *   IG 从头到尾是 0，所有葫芦圈专用机制一个都没生效，
+     *   车【纯 PD 循迹】就把葫芦圈过了。
+     *   ⇒ 强烈怀疑这些"为过不去而加的补丁"现在是在添乱。
+     *
+     * 【怎么关】ge_ig_view 记下真实判定（遥测 IG 字段、黑匣子 f 位照旧显示），
+     *   然后把 ig_now 置 0 → 后面整段 IG 状态机（mark set/clear、GW、
+     *   出圈判据、圈内丢线屏蔽……）全部不动作
+     *   → 圈内圈外的控制逻辑【完全一致】= 纯 PD。
+     *
+     * 【被关掉的是哪些控制】全部以 ge_in_gourd 为门的：
+     *   ① GOURD_NO_CROSS 圈内不按十字处理     ② 圈内 sp 不许切直道速度
+     *   ③ 分叉翻转 GOURD_USE_FLIP            ④ 出圈右转（ODOM/GW/图案/丢线四条判据）
+     *   ⑤ GW 相切点计数                       ⑥ 圈内丢线屏蔽
+     *   ★没关的：陀螺仪判据本身、遥测 IG 显示、黑匣子记录（照常，方便对照）。
+     *
+     * 【零风险】只影响"圈内是否额外做特殊控制"；直线/S 弯/直角弯/十字一律不受影响。
+     * 【回退】app_config.h 里 GOURD_CTRL_DISABLE 改回 0（行为 = 0926-G60）。 */
+#if GOURD_CTRL_DISABLE
+    ge_ig_view = ig_now;                 /* 观察值：真实判定 */
+    ig_now     = 0u;                     /* 控制闸门：强制关掉 */
+#endif
+
     if (ig_now)
     {
       ge_mark_ttl = (uint16_t)GOURD_ENTRY_MARK_TTL;    /* 在圈里 → 续命 */
@@ -1639,9 +1672,88 @@ void line_follow_control(int16_t base)
    * ========================================================================== */
 #if USE_GOURD_SM
 #if GOURD_USE_FLIP
-#if GOURD_FLIP_ON_NORMAL
-  if ((!on_cross) && gourd_flip) e = (int8_t)(-gourd_dir * GOURD_FLIP_ERR);
-#endif
+  /* ★★★ 2026-09-26 晚【触发门换成"分叉(n>=2)"；作用方式从"覆盖"改成"叠加"】★★★
+   *
+   * 【为什么换触发门】原来的门是 cand_ok(宽图案只贴一端 + 陀螺翻号)，注释自己写着
+   *   失败原因：门不可靠 → 在真相切点不触发、在别处乱触发 → 每次乱触发都白给
+   *   15 拍错误的反向修正 → 头摆得厉害，葫芦圈却没变化。
+   *   现在改用【几何量】：位图上出现两个【分离的团】(n>=2)。
+   *
+   * 【几何依据】两个外切圆(R=300)在切点处共用切线 —— 切点【正下方】只有一条线，
+   *   切点【正上方】线分叉成 Y，两支横向间距 Δ = d²/(2R)：
+   *     d=50mm → 4mm    d=100mm → 17mm    d=145mm → 35mm(≈最外一路的位置)
+   *   ⇒ 在分叉张开的那几十毫米上，位图必然出现【两个团】。
+   *     这是相切点【几何上必然存在】的标志，比"线变宽"硬得多
+   *     （宽度判据为什么三次失败：两支贴在一起时只是"稍微变粗"）。
+   *
+   * 【实车依据 FW:0926-G50】FORK 触发 9 次，其中 8 次比 GOURD-TANGENT 早 10~46mm：
+   *     FORK 1573→TAN 1598   FORK 2383→TAN 2417   FORK 3029→TAN 3039
+   *     FORK 3634→TAN 3664   FORK 3829→TAN 3875   FORK 4541→TAN 4573
+   *     FORK 4751→TAN 4789   FORK 5462→TAN 5484
+   *   ⇒ 同一个事件，FORK 是更早的那个信号。
+   *
+   * 【为什么要"反向"】相切点跨圆的本质就是【转向必须反号】：
+   *   车在圆 1 上往一个方向弯，跨到圆 2 要往反方向弯。
+   *   而分叉处两个团的重心 ≈ 0 ⇒ PD 以为"走正了"⇒ 不换向 ⇒ 顺着原圆再绕一圈。
+   *   这就是用户报的"第一圈绕一圈、第三圈绕一圈"。
+   *   ⇒ 在分叉处把误差往【进分叉前的反方向】推一把。
+   *
+   * 【为什么是叠加不是覆盖】覆盖 e = -dir*3 会把 PD 本来正确的【大】修正
+   *   （相切点 e 常到 ±14、corr ±32）压成 corr≈7 → 转向反而【变弱】。
+   *   叠加只在 PD 还没换向时推它过去；已经换向时就是再加一点，不会削弱。
+   *
+   * 【只在"有明确当前转向"时触发】|last_error| >= 2：
+   *   否则进分叉时本来就是直的，反方向没有意义，乱推会把它推到错的分支。
+   *
+   * 【零风险范围】只在 ge_in_gourd && 分叉上升沿 && 有明确转向 时才动 e；
+   *   直线/S 弯/直角弯一律不受影响。回退：GOURD_USE_FLIP 改回 0。 */
+  {
+    static uint8_t s_fk_prev = 0u;
+    uint8_t fk_n = 0u;
+    uint8_t fk_p = 0u;
+    uint8_t fk_i;
+
+    for (fk_i = 0u; fk_i < (uint8_t)LINE_CHANNELS; fk_i++)
+    {
+      uint8_t fk_b = (uint8_t)((r.raw >> fk_i) & 1u);
+      if (fk_b && (fk_p == 0u)) fk_n++;          /* 连续 1 的段数 = 几个团 */
+      fk_p = fk_b;
+    }
+
+    if ((fk_n >= 2u) && (s_fk_prev == 0u) && ge_in_gourd
+        && ((last_error >= 2) || (last_error <= -2)))
+    {
+      gourd_dir  = (last_error >= 0) ? 1 : -1;   /* 进分叉前的转向方向 */
+      gourd_flip = GOURD_FLIP_CYCLES;            /* 反向叠加窗口 */
+      /* ★★★ 一次性事件打印：这一行是"机制到底有没有跑"的唯一凭据 ★★★
+         为什么必须打：本机制只改 e、不产生任何外部可见输出。
+         没有这一行，跑完若没效果就【无法区分】：
+           ① 机制跑了但没用            → 该调 GOURD_FLIP_BIAS / 换思路
+           ② 机制压根没触发（|e0|<2）  → 该放宽触发条件
+         这两种的下一步完全不同。用户已在本项目里反复吃过"改了却没生效"的亏
+         （诊断写在永不调用的函数里、PID 换了形式没重调增益等）。
+         ★所以：日志里每个分叉处【应当】出现一行 FLIP；
+           若 FORK 有、FLIP 没有 → 就是 |last_error| 不够，放宽门限。
+         d = 叠加方向(-1 或 +1)；e0 = 触发瞬间的 last_error（看它有没有达到 ±2）。 */
+      {
+        char fm[64];
+        (void)snprintf(fm, sizeof(fm), "FLIP d=%+d e0=%+d b=%d OD=%ld",
+                       (int)gourd_dir, (int)last_error, (int)GOURD_FLIP_BIAS,
+                       (long)odom_distance_mm());
+        telemetry_msg(fm);
+      }
+    }
+    s_fk_prev = (fk_n >= 2u) ? 1u : 0u;
+  }
+
+  if (gourd_flip)
+  {
+    int16_t fk_e = (int16_t)e - (int16_t)((int16_t)gourd_dir * (int16_t)GOURD_FLIP_BIAS);
+    if (fk_e >  120) fk_e =  120;
+    if (fk_e < -120) fk_e = -120;
+    e      = (int8_t)fk_e;
+    last_e = 0;      /* 清 D 项，防换向瞬间被微分踢一脚（与旧实现一致） */
+  }
 #endif
 #endif
 
@@ -1775,7 +1887,11 @@ void line_follow_control(int16_t base)
       prevbit = b;
     }
 
-    if ((nblob >= 2u) && (s_fork_prev == 0u) && ge_in_gourd && (!line_lost)
+    if ((nblob >= 2u) && (s_fork_prev == 0u)
+        && line_follow_in_gourd()          /* ★用【观察值】而不是控制闸门 ge_in_gourd：
+                                              GOURD_CTRL_DISABLE=1 时控制被关，
+                                              但这条诊断要照常打出来做对照。 */
+        && (!line_lost)
         && ((odom_distance_mm() - s_fork_od) >= 150))   /* 同一处只报一次 */
     {
       char fm[72];
@@ -1798,6 +1914,16 @@ void line_follow_control(int16_t base)
   if (m1 < -99) m1 = -99;
   if (m2 >  99) m2 =  99;
   if (m2 < -99) m2 = -99;
+
+#if (USE_SPEED_LOOP && (WHEEL_NO_CROSS_ZERO || WHEEL_FLOOR_BY_INTENT))
+  /* ★★★ 2026-09-26 晚【转向"本意"】—— 必须在下一条语句把 m1/m2 覆盖掉之前存下来 ★★★
+     这两个数 = "循迹控制器希望这个轮子怎么转"（前进/后退/多快）。
+     下面的速度环会用 PID 输出【覆盖】m1/m2，覆盖之后就看不出本意了。
+     但速度环做的事是"把转速修到目标"，它不该把轮子的【转向】改掉 ——
+     见下面 WHEEL_NO_CROSS_ZERO 的用法。 */
+  const int16_t i1 = m1;
+  const int16_t i2 = m2;
+#endif
 
 #if USE_SPEED_LOOP
   /* ★2026-09-23 修一个会让车"像爬一样"的 bug：目标必须换算成【真正的 RPM】再交给 PID。
@@ -1854,6 +1980,48 @@ void line_follow_control(int16_t base)
     if (m1 >  99) m1 =  99; if (m1 < -99) m1 = -99;
     if (m2 >  99) m2 =  99; if (m2 < -99) m2 = -99;
 
+#if WHEEL_NO_CROSS_ZERO
+    /* ★★★ 2026-09-26 晚【速度环不许把轮子的转向改掉】★★★
+     *
+     * 【实车铁证 FW:0926-G62 轨迹（OD 3.1~4.2m，反复出现）】
+     *     T045  PWM=-20/ 20   IR:00111000   e= -3  cor= -6  sp=24
+     *     T049  PWM=-20/ 20   IR:00111000   e= -3  cor= -6  sp=24
+     *     T080  PWM=-20/ 20   IR:00111000   e= -3  cor= -6  sp=24
+     *   e=-3, cor=-6 ⇒ 循迹的【本意】是两个轮子都在前进：左 18 / 右 30。
+     *   可是速度环把左轮拉到了负端（acc 顶到 -IMAX，out = 18-25 = -7），
+     *   紧接着 PWM 下限又把这个 -7 放大成 -20。
+     *   ⇒ 结果：**转向想要左轮前进 18，实际给了左轮反转 20**，一来一回 38 个 PWM。
+     *     这是一次毫无来由的急右转；在葫芦圈上，它正好会破坏
+     *     相切点那一下本来就很勉强的反向。
+     *
+     * 【为什么速度环会拉到负端】它只认"转速目标"，看到转速偏高就一直减。
+     *   但它【没有权力改变转向】—— 转向是循迹控制器（sp+corr）决定的。
+     *   速度环的合法范围是"在本意方向上把转速修准"，即 0 ~ 本意值，
+     *   【不允许越过 0】。
+     *
+     * 【修法】本意前进(i>0) → 输出不得为负；本意后退(i<0) → 输出不得为正。
+     *   越过 0 的，夹到 0（滑行，不是反转）。
+     *   ★为什么夹到 0 而不是夹到 +FLOOR：夹到 +FLOOR 会【完全剥夺】速度环的
+     *     减速能力（连滑行都不许），风险更大。夹到 0 保留了全部减速能力，
+     *     只去掉"把前进变成反转"这一件事。
+     *   ★夹到 0 之后会不会停转？会短暂滑行；轮子一慢，err 变正，
+     *     增量式 PID 的 acc 会从负端往回升 → 自动恢复。是自纠正的。
+     *   ★位置：必须在下限(WHEEL_PWM_FLOOR)之前 —— 夹成 0 后 |0| < MIN_CMD(2)，
+     *     下限不会再把 0 抬起来（这正是我们要的：滑行，不是爬行）。
+     *
+     * 【零风险范围】只在"本意与实际符号相反"时动作；本意本就为 0（停车）时不动。
+     *   丢线原地旋转(左右本意相反)不受影响 —— 那本来就该反着转。
+     *   急停/终点停车(sp=0,corr=0)本意为 0 → 不动作 ✓
+     * 【回退】app_config.h 里 WHEEL_NO_CROSS_ZERO 改 0。 */
+    if ((i1 > 0) && (m1 < 0)) m1 = 0;
+    if ((i1 < 0) && (m1 > 0)) m1 = 0;
+    if ((i2 > 0) && (m2 < 0)) m2 = 0;
+    if ((i2 < 0) && (m2 > 0)) m2 = 0;
+#endif
+
+    /* ★G81：「本拍有没有轮子被从停/反转拉回正转」→ 记进黑匣子 f 的 bit3 */
+    uint8_t unstop_hit = 0u;
+
 #if WHEEL_PWM_FLOOR
     /* ★★★ 2026-09-26 【PWM 下限：防左轮掉进启动死区】★★★
        实车数据（FW:0926-1900，葫芦圈段 407 样本）：左轮 RPM1 < 30 的拍数占 21%
@@ -1870,10 +2038,79 @@ void line_follow_control(int16_t base)
          丢线旋转(±LOST_SPIN_SPEED)、急停、终点停车全会失效。
          同时 FLOOR 必须 < MIN_CMD，否则 0 也会被抬起来。
        ★这是治标：根因在左轮机械。修好机械后把 WHEEL_PWM_FLOOR 改 0。 */
+#if WHEEL_FLOOR_BY_INTENT
+    /* 下限跟着【本意方向】走，而不是跟着输出的符号走。详细说明见 app_config.h
+       的 WHEEL_FLOOR_BY_INTENT。三句话概括：
+         本意前进 i>0  → 输出至少 +FLOOR（不许刹到 0，更不许反转）
+         本意后退 i<0  → 输出至多 -FLOOR
+         本意 = 0      → 不动作（保住停车与急停）
+       这样既保住"轮子始终拿得到死区以上的 PWM"，又消掉"本意前进却输出 -30"。 */
+    /* ★★G80：下限不得超过本轮自己的本意（floor_eff = min(FLOOR, |i|)）★★
+       为什么：G79 实测下限 36 ≥ sp 24 ⇒ 63% 的拍正好钉在 ±36，
+       |cor| ≤ 12 的拍（占 45%）实际差速 = 0 —— 下限把转向权限吃光了。
+       证据、风险与判据见 app_config.h 的 WHEEL_FLOOR_CAP_BY_INTENT。 */
+    {
+      int16_t fl = (int16_t)WHEEL_PWM_FLOOR;
+#if WHEEL_FLOOR_CAP_BY_INTENT
+      int16_t al = (int16_t)((i1 >= 0) ? i1 : -i1);   /* |本意| */
+      if (al < fl) fl = al;                           /* 只抬到"它自己要的"那么多 */
+#endif
+      if (i1 > 0)
+      {
+        if (m1 < fl) m1 = fl;
+      }
+      else if (i1 < 0)
+      {
+        if (m1 > -fl) m1 = -fl;
+      }
+    }
+
+    {
+      int16_t fr = (int16_t)WHEEL_PWM_FLOOR;
+#if WHEEL_FLOOR_CAP_BY_INTENT
+      int16_t ar = (int16_t)((i2 >= 0) ? i2 : -i2);
+      if (ar < fr) fr = ar;
+#endif
+      if (i2 > 0)
+      {
+        if (m2 < fr) m2 = fr;
+      }
+      else if (i2 < 0)
+      {
+        if (m2 > -fr) m2 = -fr;
+      }
+    }
+
+#if WHEEL_NO_STOP_BRAKE
+    /* ★★★ G81【不许把轮子停住/反转】—— 治"死螺旋"★★★
+     *
+     * 机制（两趟实车日志完全对上，左右镜像）：
+     *   ① 大修正 → 内轮本意 ≤ 0 → 输出把它刹住/反转
+     *   ② 内轮停下 → 车只能靠外轮推 → **车开始绕着这个停住的轮子打转**
+     *   ③ 要让它重新滚起来，得克服接触点静摩擦 ≈ μ·N·r ≈ 0.17 N·m，
+     *      与这类小减速电机的堵转力矩同量级 ⇒ **起不来，永久锁死**
+     *   ④ 车变成"单轮驱动 + 绕圈"，控制器越修越深 ⇒ 葫芦圈里兜圈子出不来
+     *
+     * 实车证据：G80 左轮 81% 时间读 0~14（命令 30~67，速度环已顶到 IMAX=25 也无用），
+     *   单轮驱动占 70%、最长 622mm，L/R 里程 = 1:2.6；G79 是它的镜像（右轮、1:2.28）。
+     *
+     * 改法：只要这拍"有本意"（两轮不全是 0 = 不是停车），
+     *   任何一轮都不许被压到 +WHEEL_MIN_ROLL 以下 —— 想刹车/后退也【保持正转】。
+     *   最小转弯半径 ≈ (轮距/2)×(v外+v内)/(v外−v内) ≈ 77mm，远小于葫芦圈需要的 200~300mm
+     *   ⇒ 转向权限没丢，只是不再"原地锁死"。
+     * 不受影响：出圈右转 / 丢线原地旋转 / 停车（都在别的路径上直接 motor_set_differential）。 */
+    if ((i1 != 0) || (i2 != 0))
+    {
+      if (m1 < (int16_t)WHEEL_MIN_ROLL) { m1 = (int16_t)WHEEL_MIN_ROLL; unstop_hit = 1u; }
+      if (m2 < (int16_t)WHEEL_MIN_ROLL) { m2 = (int16_t)WHEEL_MIN_ROLL; unstop_hit = 1u; }
+    }
+#endif
+#else
     if (m1 > WHEEL_FLOOR_MIN_CMD  && m1 < (int16_t)WHEEL_PWM_FLOOR) m1 = (int16_t)WHEEL_PWM_FLOOR;
     if (m1 < -WHEEL_FLOOR_MIN_CMD && m1 > -(int16_t)WHEEL_PWM_FLOOR) m1 = -(int16_t)WHEEL_PWM_FLOOR;
     if (m2 > WHEEL_FLOOR_MIN_CMD  && m2 < (int16_t)WHEEL_PWM_FLOOR) m2 = (int16_t)WHEEL_PWM_FLOOR;
     if (m2 < -WHEEL_FLOOR_MIN_CMD && m2 > -(int16_t)WHEEL_PWM_FLOOR) m2 = -(int16_t)WHEEL_PWM_FLOOR;
+#endif
 #endif
     /* ★★★ 2026-09-26 晚【把控制器的"决策"记进黑匣子】★★★
        为什么必须加：黑匣子原来只记 IR/RPM/PWM/GZ —— 那些是【结果】。
@@ -1891,7 +2128,8 @@ void line_follow_control(int16_t base)
     line_follow_dbg_set(e, corr, sp, (uint16_t)lost_cycles,
                         (uint8_t)((line_lost ? 1u : 0u) |
                                   (line_follow_in_gourd() ? 2u : 0u) |
-                                  (s_wo_hold ? 4u : 0u)));
+                                  (s_wo_hold ? 4u : 0u) |
+                                  (unstop_hit ? 8u : 0u)));   /* ★G81 bit3：本拍拉回过轮子 */
   }
 #endif
 
@@ -2514,7 +2752,16 @@ uint16_t line_follow_edge_hold_cnt(void)
 uint8_t line_follow_in_gourd(void)
 {
 #if (USE_GOURD_EXIT || USE_GOURD_LOST_GUARD)
+#if GOURD_CTRL_DISABLE
+  /* 开关打开时返回【观察值】：控制闸门被强制关成 0，但遥测 IG 字段和黑匣子 f 位
+     仍要照常反映"真实在不在圈里"，方便与行为对照。
+     ★已核实本函数只被遥测/黑匣子使用（telemetry.c:182/308/368 与 dbg 标志位），
+       控制路径一处都没用。 */
+  return ge_ig_view;
+#else
+  /* 开关关闭 ⇒ 与 0926-G60【完全一致】：返回原有的锁存印记（不是瞬时判定）。 */
   return ge_in_gourd;
+#endif
 #else
   return 0u;
 #endif
@@ -2672,6 +2919,9 @@ void line_follow_init(void)
   ge_cool       = 0;
   ge_events     = 0;
   ge_in_gourd   = 0;
+#if GOURD_CTRL_DISABLE
+  ge_ig_view    = 0;
+#endif
   ge_mark_ttl   = 0;
   ge_fired      = 0;
   ge_plain_cnt  = 0;
