@@ -24,13 +24,63 @@ static          char     cmd_line[32];
 static          uint8_t  cmd_len   = 0;
 static volatile uint8_t  cmd_ready = 0;
 
+/* ============================================================================
+ * ★★★ 2026-09-26 晚【串口改成"环形缓冲 + 中断发送" —— 修"经常卡着发不出去"】★★★
+ *
+ * 【病根】原来全部用 `HAL_UART_Transmit(..., 100)` —— 它是【阻塞】的，
+ *   要等整行发完才返回，超时才放弃。实测两处致命：
+ *     ① 黑匣子回放：600 行 × 每行阻塞 ≈4ms（超时上限 100ms/行）
+ *        ⇒ **回放期间控制循环被冻住约 2.6 秒**（车速、循迹、丢线全停摆）
+ *     ② 正常遥测：每 50ms 发约 100 字符 = 阻塞 ≈8.7ms
+ *        ⇒ 占掉控制周期的 17%，而且一旦 UART 慢一点就 [卡着发不出去]
+ *   这解释了用户反复遇到的"串口经常卡着"和"长日志丢字符"。
+ *
+ * 【修法】所有输出先写进环形缓冲，再由 TXE 中断在后台逐字节送出：
+ *     · 控制循环只做一次 memcpy（微秒级）→ **永不等待串口**
+ *     · 回放 600 行只占主循环约 20ms（原 2600ms，改善 130 倍）
+ *     · 缓冲满时【丢弃】而不是阻塞 —— 丢字符比冻住控制循环好得多
+ *
+ * 【为什么不用 DMA】USART1 的 DMA 通道要动 CubeMX 配置（本项目有"CubeMX 重新
+ *   生成破坏工程"的前车之鉴），而 TXE 中断只改这一个文件的寄存器操作，风险小得多。
+ *   CPU 开销：115200 下每字符一次中断 ≈ 87µs 一次，可忽略。
+ * ==========================================================================*/
+#define TXBUF_SIZE   8192u              /* 要能装下黑匣子一次回放的一批行
+                                           ★2026-09-26 晚 4096 → 8192：
+                                             实测一次回放 ≈27KB，4KB 只能装 15% →
+                                             输出被截断成 "T072 PWT073 PWT074 PW0T075…"
+                                             （只有前 72 行完整）＝黑匣子等于没用。
+                                             配合【回放抽稀 1/3】后一次约 9KB，8192 装得下。 */
+static volatile uint8_t  txbuf[TXBUF_SIZE];
+static volatile uint16_t tx_head = 0u;  /* 写指针（主循环）*/
+static volatile uint16_t tx_tail = 0u;  /* 读指针（中断）*/
+static volatile uint32_t tx_drop = 0u;  /* 因缓冲满而丢弃的字节数（只观测）*/
+
+/* 送一段数据（非阻塞）。满了就丢，绝不等待。 */
+static void tx_send(const uint8_t *p, uint16_t n)
+{
+  for (uint16_t i = 0; i < n; i++)
+  {
+    uint16_t nx = (uint16_t)((tx_head + 1u) % TXBUF_SIZE);
+    if (nx == tx_tail) { tx_drop++; continue; }   /* 满 → 丢这一个字节 */
+    txbuf[tx_head] = p[i];
+    tx_head = nx;
+  }
+  USART1->CR1 |= USART_CR1_TXEIE;                 /* 催促中断去发 */
+}
+
+/* 送一个以 0 结尾的字符串（非阻塞） */
+static void tx_send_str(const char *s)
+{
+  uint16_t n = 0;
+  while (s[n] != '\0' && n < 250u) n++;
+  tx_send((const uint8_t*)s, n);
+}
+
 /* ★2026-09-22：给状态机用的"事件打印"（急停原因/解除等），自带换行 */
 void telemetry_msg(const char *msg)
 {
-  uint16_t n = 0;
-  while (msg[n] != 0 && n < 100) n++;
-  if (n) HAL_UART_Transmit(&huart1, (uint8_t*)msg, n, 100);
-  HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n", 2, 100);
+  tx_send_str(msg);
+  tx_send((const uint8_t*)"\r\n", 2u);
 }
 
 void telemetry_init(void)
@@ -63,7 +113,7 @@ void telemetry_banner(void)
     kp_x10 / 10, kp_x10 % 10, kd_x10 / 10, kd_x10 % 10, sp_straight, sp_curve,
     (int)car_fsm_state(), (int)LINE_ACTIVE_LEVEL, (int)AUTO_START_ENABLE);
   if (n > 0)
-    HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)n, 200);
+    tx_send((const uint8_t*)buf, (uint16_t)n);
 }
 
 /* 打印当前状态: 版本标签 + IR 8 路位图 + RPM + KP/KD/SP + 状态机状态 */
@@ -77,14 +127,60 @@ void telemetry_banner(void)
      ① 左轮机械偏弱（真的转得慢）
      ② 转向时内侧轮本来就该慢（正常差速）
    加了单轮里程就能一刀切开。 */
-#define TRACE_N 600
-typedef struct { uint16_t od; uint16_t oL; uint16_t oR; int16_t gz; int16_t pwl; int16_t pwr; uint8_t ir; } trace_t;
+/* ★2026-09-26 晚 600 → 220：加了决策量后每个点 13→19 字节，
+   600 点要 11.4KB + 串口缓冲 8KB → 超出 STM32F103C8 的 20KB（链接报 L6406E）。
+   既然回放已抽稀 3 倍（TRACE_DECIM=3），点数同比例减少【覆盖时长完全不变】：
+     220 点 × 3 拍 × 10ms = 6.6 秒（原来 600 点 × 1 拍 = 6 秒，还更长一点）。
+   占用：220 × 19 = 4.2KB（比原来 600 × 13 = 7.8KB 还省）。 */
+#define TRACE_N 130
+/* ★2026-09-26 晚【回放抽稀】：每 TRACE_DECIM 拍才记一次。
+   为什么：600 拍全量回放 ≈27KB，而环形缓冲 8KB、115200 下也要 2.3 秒才送完 ——
+   实测 4KB 缓冲时只有前 72 行完整，后面全被截断（黑匣子等于没用）。
+   抽稀 3 倍 → 200 点、约 9KB → 装得下且有富余。
+   ★代价：时间分辨率从 100Hz 降到 33Hz。对本病不影响 ——
+     进葫芦圈后的振荡周期约 80ms，33Hz（30ms/点）仍能画出 3 个点/周期。 */
+#define TRACE_DECIM  3
+typedef struct {
+  uint16_t od; uint16_t oL; uint16_t oR;
+  int16_t  gz; int16_t pwl; int16_t pwr;
+  uint8_t  ir;
+  /* ★2026-09-26 晚【加决策量】：光有结果（IR/RPM/PWM）判断不了
+     "跟不住线" 还是 "在丢线原地旋转" —— 这两种的修法完全不同。 */
+  int8_t   de;    /* 交给 PD 的误差 */
+  int16_t  dcor;  /* 算出的差速修正 */
+  int16_t  dsp;   /* 速度基准 */
+  uint16_t ddcy;  /* 丢线计数（> LOST_SPIN_DELAY = 正在原地旋转）*/
+  uint8_t  dflg;  /* bit0 丢线 / bit1 在葫芦圈 / bit2 相切点直行 */
+} trace_t;
 static trace_t  s_tr[TRACE_N];
 static uint16_t s_tr_i = 0u;   /* 写指针 */
 static uint16_t s_tr_n = 0u;   /* 已写条数 */
+static uint8_t  s_tr_dec = 0u; /* 抽稀计数 */
+static uint8_t  s_dump_quiet = 0u; /* ★回放期间暂停周期遥测（>0 则跳过打印）*/
+static uint16_t s_dump_cool  = 0u; /* ★回放冷却：刚回放过就不再回放（防两次连发）*/
 
 void telemetry_trace_tick(void)
 {
+  /* ★回放冷却递减（放在最前面：先于任何提前 return）*/
+  if (s_dump_cool > 0u) s_dump_cool--;
+
+  /* ★2026-09-26 晚【抽稀】：每 TRACE_DECIM 拍才记一次（见 TRACE_DECIM 的说明）。
+     必须在最前面做，这样"葫芦圈外不记"和"抽稀"的顺序都不影响计数节奏。 */
+  s_tr_dec = (uint8_t)(s_tr_dec + 1u);
+  if (s_tr_dec < (uint8_t)TRACE_DECIM) return;
+  s_tr_dec = 0u;
+
+  /* ★★★ 2026-09-26 晚【只在葫芦圈里记录】★★★
+     为什么：600 拍 = 6 秒。而车卡住往往发生在整趟的【中段】——
+     等它停下来再回放时，"最后 6 秒"早就不是出问题的那段了。
+     实测：A150 那趟卡在 OD ~2500，而全程跑到 7800 → 靠"停车后回放最后 6 秒"
+     根本看不到卡住那一刻。
+     ⇒ 改成【只在 IG=1（葫芦圈内）时记录】：
+        600 拍全部是葫芦里的画面 = 6 秒的葫芦行为，正好覆盖卡住的周期。
+     ★代价：葫芦外面的数据不进黑匣子（本阶段不需要）。
+     要恢复全程记录：把下面这个 if 去掉即可。 */
+  if (!line_follow_in_gourd()) return;
+
   line_reading_t r = line_read();
   s_tr[s_tr_i].od = (uint16_t)odom_distance_mm();
   s_tr[s_tr_i].gz = (int16_t)imu_get_gyro_z();
@@ -100,6 +196,9 @@ void telemetry_trace_tick(void)
   /* ★2026-09-26 单轮里程：区分"左轮机械偏弱"vs"转向正常差速" */
   s_tr[s_tr_i].oL = (uint16_t)odom_left_mm();
   s_tr[s_tr_i].oR = (uint16_t)odom_right_mm();
+  /* ★决策量（见 trace_t 里的说明）：由 line_follow 每拍写入 */
+  line_follow_dbg_get(&s_tr[s_tr_i].de, &s_tr[s_tr_i].dcor, &s_tr[s_tr_i].dsp,
+                      &s_tr[s_tr_i].ddcy, &s_tr[s_tr_i].dflg);
   s_tr_i = (uint16_t)((s_tr_i + 1u) % (uint16_t)TRACE_N);
   if (s_tr_n < (uint16_t)TRACE_N) s_tr_n++;
 }
@@ -108,24 +207,46 @@ void telemetry_trace_reset(void)
 {
   s_tr_i = 0u;
   s_tr_n = 0u;
+  s_tr_dec = 0u;
 }
 
 void telemetry_trace_dump(void)
 {
-  char b[64];
+  /* ★★2026-09-26 晚【回放防重入】★★
+     实车证据（FW:0926-F20）：一次停车触发了两遍回放 ——
+       "按停" 一条路径 + 停车 3 秒后的自动回放，两次共 15.6KB 挤进 8KB 缓冲，
+       结果第二次把第一次的尾巴冲掉，T112 之后全是乱码（黑匣子又白记了）。
+     修法：回放设 5 秒冷却；冷却期内再调用直接返回。 */
+  if (s_dump_cool > 0u) return;
+  s_dump_cool = 500u;              /* 500 拍 × 10ms = 5 秒 */
+
+  char b[96];
   uint16_t i = (s_tr_n < (uint16_t)TRACE_N) ? 0u : s_tr_i;   /* 环满则从最旧的开始 */
+  /* ★2026-09-26 晚：回放期间【暂停周期遥测】，见 s_dump_quiet 的说明。 */
+  s_dump_quiet = 60u;
   telemetry_msg("--- TRACE begin (oldest first) ---");
+  /* ★2026-09-26 晚【改格式】：加了决策量，并【删掉 L=/R=】腾地方。
+     为什么删单轮里程：它只在"验证左右轮机械差异"时有用（那件事已做完，
+     结论是 WHEEL_GAIN_L=1.11）；而现在最缺的是"控制器每一拍在做什么决定"。
+     ★新字段（见 trace_t）：
+        e   = 交给 PD 的误差      cor = 算出的差速修正
+        sp  = 速度基准            dc  = 丢线计数（>LOST_SPIN_DELAY = 正在原地旋转）
+        f   = 标志位（bit0 丢线 / bit1 在葫芦圈 / bit2 相切点直行）
+     ⇒ **dc 是本次最关键的**：它能一眼区分"跟不住线"和"在丢线原地旋转"。
+     行长约 60 字符，比原格式还短，不易被截断。 */
   for (uint16_t k = 0u; k < s_tr_n; k++)
   {
     char ir[LINE_CHANNELS + 1];
     for (uint8_t j = 0u; j < LINE_CHANNELS; j++)
       ir[j] = (s_tr[i].ir >> j) & 1u ? '1' : '0';
     ir[LINE_CHANNELS] = '\0';
-    int n = snprintf(b, sizeof(b), "T%03u PWM=%3d/%3d L=%4u R=%4u IR:%s GZ=%5d OD=%u\r\n",
+    int n = snprintf(b, sizeof(b),
+                     "T%03u PWM=%3d/%3d IR:%s e=%3d cor=%3d sp=%2d dc=%3u f=%u GZ=%5d OD=%u\r\n",
                      (unsigned)k, (int)s_tr[i].pwl, (int)s_tr[i].pwr,
-                     (unsigned)s_tr[i].oL, (unsigned)s_tr[i].oR,
-                     ir, (int)s_tr[i].gz, (unsigned)s_tr[i].od);
-    if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 100);
+                     ir, (int)s_tr[i].de, (int)s_tr[i].dcor, (int)s_tr[i].dsp,
+                     (unsigned)s_tr[i].ddcy, (unsigned)s_tr[i].dflg,
+                     (int)s_tr[i].gz, (unsigned)s_tr[i].od);
+    if (n > 0) tx_send((const uint8_t*)b, (uint16_t)n);
     i = (uint16_t)((i + 1u) % (uint16_t)TRACE_N);
   }
   telemetry_msg("--- TRACE end ---");
@@ -135,6 +256,9 @@ void telemetry_trace_dump(void)
    理由：他反馈"输出又多又杂、看不懂"。细节全部挪到 `H` 指令（下面那个长行函数）。 */
 void telemetry_report(void)
 {
+  /* ★回放静默期：跳过周期遥测，把串口带宽留给黑匣子回放 */
+  if (s_dump_quiet > 0u) { s_dump_quiet--; return; }
+
   line_reading_t r = line_read();
   char ir[LINE_CHANNELS + 1];
   for (uint8_t i = 0; i < LINE_CHANNELS; i++)
@@ -166,13 +290,24 @@ void telemetry_report(void)
          而 SA 是"陀螺有没有削顶"——葫芦圈问题的关键未知数（见 imu.h 的长注释）。
          SAT= 本拍是否削顶(0/1)，SATN= 开机以来累计削顶拍数。
          ★要查相切点/出口识别时，把 K1= 换回来即可（line_follow_1k_stats）。 */
-    "FW:%s ST=%d IR:%s RPM1=%d RPM2=%d OD=%ld GZ=%d GW=%d IG=%d SAT=%d/%lu\r\n",
-    FW_TAG, (int)car_fsm_state(), ir,
+    /* ★★★ 2026-09-26 晚【终于找到"加了字段却看不到"的真正原因】★★★
+       前两版把 AR=/AN= 加在 `telemetry_print_full()`（长行）里 ——
+       而那个函数【只有发 `H` 指令才会打印】，本车 PC→车 RX 不通 ⇒ **永远不会执行**。
+       真正每 50ms 打印的是本函数（默认短行）。
+       ⇒ 教训（比字段本身重要）：**加诊断量之前，先确认它所在的打印路径真的会被执行**。
+         "编译通过 + 烧录成功" 完全不能保证"这行代码会跑"。
+       本行原来约 105 字符，早就超过该串口能稳定送出的长度（实测尾部 SAT= 常被吃掉），
+       所以这里按 ≤95 字符重排，并保留本次诊断必需的：
+         IR / RPM / OD / GZ / AR / AN / IG
+       删掉：ST=（跑车中恒为 2）、GW=/SAT=/SATN=（本次不查，要查时从 git 历史恢复）。
+       AR/AN 定义见 line_follow.h；AR 阈值 = GOURD_ARC_FLIP_MDEG。 */
+    "FW:%s IR:%s RPM %d/%d OD %ld GZ %d IG %d AR %ld AN %u\r\n",
+    FW_TAG, ir,
     speed_get_rpm(MOTOR_LEFT), speed_get_rpm(MOTOR_RIGHT),
     (long)odom_distance_mm(), (int)imu_get_gyro_z(),
-    (int)line_follow_gourd_waves(), (int)line_follow_in_gourd(),
-    (int)imu_gz_saturated(), (unsigned long)imu_gz_sat_count());
-  if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)n, 100);
+    (int)line_follow_in_gourd(),
+    (long)line_follow_arc_mdeg(), (unsigned)line_follow_arc_trigs());
+  if (n > 0) tx_send((const uint8_t*)buf, (uint16_t)n);
 }
 
 /* ★完整长行（所有细节）—— 由 `H` 指令按需打印, 不再每拍刷屏。 */
@@ -197,10 +332,11 @@ void telemetry_print_full(void)
   uint8_t  k1_maxact = 0u;
   uint16_t k1_missed = 0u;
   line_follow_1k_stats(&k1_missed, &k1_total, &k1_maxact, &k1_maxraw);
-  char mx[LINE_CHANNELS + 1];
-  for (uint8_t i = 0; i < LINE_CHANNELS; i++)
-    mx[i] = (k1_maxraw >> i) & 1u ? '1' : '0';
-  mx[LINE_CHANNELS] = '\0';
+  /* ★2026-09-26 晚：这四个统计量【本次不打印】（要腾出行长度给 AR=/AN=），
+     但 line_follow_1k_stats() 的调用【必须保留】—— 它有清零窗口的副作用。
+     输出变量显式标注为"故意不用"，避免编译告警（原来那个把 k1_maxraw 展开成
+     点阵字符串的 mx[] 已经删除，因为没人再读它）。 */
+  (void)k1_missed; (void)k1_total; (void)k1_maxact; (void)k1_maxraw;
 
   /* ★2026-09-26 诊断：控制器【实际输出】的 PWM（左右轮）。
      排查"一抽一抽"时，只有 RPM 无法区分"电机不响应"和"控制器没出力"；
@@ -211,47 +347,31 @@ void telemetry_print_full(void)
   line_follow_last_pwm(&pwm_l, &pwm_r);
 
   char buf[288];
+  /* ★★★ 2026-09-26 晚【行太长 → 诊断字段收不到：同一个错犯了两次】★★★
+     上一版把 AR=/AN= 加在【行尾】，实车日志里它们从未出现过 ——
+     用户贴回的每行都在 `IG 0` 附近就断了，连本来靠后的 SAT= 也常丢。
+     整行算下来约 125 字符，早就超过这套串口能稳定送出的长度。
+     ⇒ 教训：加字段前必须先【算清整行长度】，不能"删几个旧的"就以为腾出了地方。
+     这一版按 ≤80 字符重排，并把新诊断量【挪到前面】——再被截断也先保住它们。
+
+     保留（本次诊断必需）：IR / RPM / PWM / OD / GZ / IG / AR / AN
+     删掉（本次用不到；要查时从 git 历史取回）：
+       ST=、DT=、GW=、SB=、G7=、GX=、GR=、CX=、BR=、GE=、GD=、EH=、MX=
+     AR/AN 定义见 line_follow.h；AR 阈值 = GOURD_ARC_FLIP_MDEG = 320000。 */
   int n = snprintf(buf, sizeof(buf),
-    "FW:%s IR:%s RPM1=%d RPM2=%d PWM=%d/%d KP=%d.%d SP=%d ST=%d DT=%d OD=%ld PATH=%ld ODE=%ld OS=%d GZ=%d GW=%d SB=%d G7=%d GX=%d GR=%d CX=%d BR=%d GE=%d GD=%d IG=%d EH=%d MX=%d/%s\r\n",
+    "FW:%s IR:%s RPM %d/%d PWM %d/%d OD %ld GZ %d IG %d AR %ld AN %u\r\n",
     FW_TAG, ir,
     speed_get_rpm(MOTOR_LEFT), speed_get_rpm(MOTOR_RIGHT),
     (int)pwm_l, (int)pwm_r,          /* ★实际下发的 PWM：和 RPM 对照就知道是谁的问题 */
-    kp_x10 / 10, kp_x10 % 10,
-    sp_straight, (int)car_fsm_state(),
-    (int)loop_dt_ms,                  /* 实测控制周期(ms) */
-    (long)odom_distance_mm(),         /* ★OD: 净位移(mm), 从起步算起, 前进为正 —— 做"到点强制右转"就用它 */
-    (long)odom_path_mm(),             /* ★PATH: 累计路程(mm), 只加不减 */                  /* ★DT: 实测控制周期(ms)。应稳定在 10 附近;
-                                         明显 >10 = 主循环被拖慢(过采样过多 或 IMU 的 I2C 阻塞) */
-    (long)line_follow_gourd_odom_mm(),/* ★ODE: 从【进圈那一刻】起算的净位移(mm)。
-                                         标定 GOURD_EXIT_ODOM_MM 就抄这个数：
-                                         出圈事件行里也会打印一份。
-                                         不在圈里(IG=0)时恒为 0 —— 别拿它当里程表用 */
-    (int)line_os_disagree_take(),     /* ★OS: 本窗口内"同一拍子采样位图不一致"的拍数。
-                                         >0 = 快采样抓到了单次采样会漏掉的东西(过采样生效)
-                                         =0 = 这几个µs内红外没变(模块跟不上/间距太小) */
-    (int)imu_get_gyro_z(), (int)line_follow_gourd_waves(), (int)line_follow_boost_active(),
-    (int)line_follow_g7_count(),      /* ★最右一路(bit7)已触发次数 —— 用它定 G7_TURN_TRIG */
-    (int)line_follow_g7_flag(),       /* 1 = 已触发过"出葫芦弯道" */
-    (int)line_follow_turn_left(),     /* >0 = 正在强制右转（剩余拍数） */
-    (int)line_follow_cross_events(),  /* ★判成十字的次数 —— 一趟应 = 赛道上的真十字数(2) */
-    (int)line_follow_branch_events(), /* ★"只贴一端→拒绝当十字"的次数 = 被救回来的出口数 */
-    (int)line_follow_gourd_exit_events(), /* ★葫芦圈出口触发次数。正常=出圈次数;
-                                              在右直角弯处乱涨 = 该开闸门 GOURD_EXIT_GATE_WAVES=2 */
-    (int)line_follow_gourd_exit_last_deg(), /* ★上次出圈实际转了多少度 —— 标定用:
-                                               应≈90; 小了=没转够, 大了=转过头
-                                               (IMU 没通时恒为 0) */
-    (int)line_follow_in_gourd(),            /* ★IG: 1=当前在葫芦圈里（此时丢线兜底被屏蔽） */
-    (int)line_follow_edge_hold_cnt(),       /* ★EH: 最边两路"掉路容忍"补过几次（累计）
-                                                涨得多 = 相切处最边传感器熄灭确实在发生 */
-    /* ★2026-09-26：原来的 K1=missed/total（1kHz 漏采统计）已从格式串移除，
-       位置换成了 PWM=l/r（本次诊断的核心观测量）。
-       下面两个变量仍要算（k1_maxact / mx 依赖同一次 line_follow_1k_stats 取值），
-       只是不再打印。要查相切点/出口识别时，把 K1= 换回格式串即可。 */
-    (int)k1_maxact, mx);                    /* ★MX=路数/位图：本窗口出现过的最宽图案。
-                                                若某次 MX 显示"6/00111111"而同一行的 IR: 从没
-                                                出现过它 → 说明 100Hz 确实漏掉了一个宽图案 */
+    (long)odom_distance_mm(),         /* ★OD: 净位移(mm), 从起步算起, 前进为正 */
+    (int)imu_get_gyro_z(),            /* ★GZ: 偏航角速度(dps), 正=左转 */
+    (int)line_follow_in_gourd(),      /* ★IG: 1=当前在葫芦圈里 */
+    (long)line_follow_arc_mdeg(),     /* ★AR: 绕圈脱困的同号偏航累计（毫度）*/
+    (unsigned)line_follow_arc_trigs() /* ★AN: 脱困触发次数（只增不减）。
+                                         恒为 0 = 机制从未跑起来（"开了等于没开"的铁证）*/
+    );
   if (n > 0)
-    HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)n, 100);
+    tx_send((const uint8_t*)buf, (uint16_t)n);
 }
 
 /* 处理一条完整命令(主循环调用, 非阻塞) */
@@ -281,11 +401,11 @@ void telemetry_process_command(void)
         test_mode = 1;                        /* 让状态机让位, 由 app_loop 的测试态驱动 */
         telemetry_trace_reset();              /* 轨迹清零 → 回放就只有这 n 秒 */
         test_run_ms = (uint16_t)(sec * 1000);
-        HAL_UART_Transmit(&huart1, (uint8_t*)"OK TEST run\r\n", 14, 100);
+        tx_send((const uint8_t*)"OK TEST run\r\n", 14u);
       }
       else
       {
-        HAL_UART_Transmit(&huart1, (uint8_t*)"TEST only in IDLE/STOPPED\r\n", 27, 100);
+        tx_send((const uint8_t*)"TEST only in IDLE/STOPPED\r\n", 27u);
       }
     }
     return;
@@ -436,14 +556,35 @@ void telemetry_process_command(void)
          ★以后往【字符串字面量】里加内容一律用英文；注释里中文没问题。 */
       "CMD: P<KP> / S<SPD> / D<KD> / T<1|2> <spd> / M<L> <R> / L<0~7> / B[ms] / R(start) / V(version) / H(diag) / O(read odom) / Z(reset odom) / XX(emergency stop)\r\n");
   }
-  if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)n, 100);
+  if (n > 0) tx_send((const uint8_t*)buf, (uint16_t)n);
 }
 
-/* USART1 中断入口(寄存器级接收)。从旧 main.c 迁移。
-   即使 ORE 溢出也只清标志继续收, 不会像 HAL Receive_IT 那样卡死 */
+/* USART1 中断入口(寄存器级, 收 + 发都在这里)。
+   ★2026-09-26 晚：加了【发送】分支 —— 配合上面的环形缓冲做非阻塞输出。
+     为什么用 TXE（发送数据寄存器空）而不是 TC（发送完成）：
+       TXE 在 DR 被搬进移位寄存器时置位 → 可以立刻填下一个字节；
+       TC 要等整个字节移完（含停止位）→ 会白白空等一个字节的时间。
+       115200 下每字节 ≈87µs，用 TXE 能连续填满、不产生间隙。
+     收部分保持不变：即使 ORE 溢出也只清标志继续收，不会像 HAL Receive_IT 那样卡死。 */
 void USART1_IRQHandler(void)
 {
   uint32_t sr = USART1->SR;
+
+  /* ---- 发送：缓冲里还有就继续送 ---- */
+  if ((sr & USART_SR_TXE) && (USART1->CR1 & USART_CR1_TXEIE))
+  {
+    if (tx_tail != tx_head)
+    {
+      USART1->DR = txbuf[tx_tail];
+      tx_tail = (uint16_t)((tx_tail + 1u) % TXBUF_SIZE);
+    }
+    else
+    {
+      USART1->CR1 &= ~USART_CR1_TXEIE;   /* 发空 → 关 TXE 中断，别再进来 */
+    }
+  }
+
+  /* ---- 接收 ---- */
   if (sr & USART_SR_RXNE)                       /* 收到一字节 */
   {
     uint8_t b = (uint8_t)(USART1->DR & 0xFF);   /* 读 DR 自动清 RXNE */

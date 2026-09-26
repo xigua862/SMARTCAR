@@ -10,6 +10,7 @@
 #include "control/line_follow.h"
 #include "fsm/car_fsm.h"
 #include "telemetry.h"
+#include <stdio.h>               /* ★模式 6 的 snprintf（把扫描结果拼成一行打印） */
 
 /* ---- 运行时参数(在线可改), 供 line_follow / telemetry 共享 ---- */
 int16_t kp_x10      = KP * 10;
@@ -34,6 +35,81 @@ static uint32_t t_ui  = 0;
 /* ★2026-09-26 开机自动开环测试的"毫秒延时"计数器。
    主循环 1ms 一圈 → 这里减到 0 就启动测试态。见 app_loop 里的说明。 */
 static uint16_t ol_delay_ms = TEST_OL_DELAY_MS;
+#endif
+
+#if TEST_AUTO_OPENLOOP && (TEST_SPEEDLOOP_MODE == 6)
+/* ===========================================================================
+ * ★★★ 2026-09-26【模式 6：PWM 死区扫描】★★★
+ *
+ *  ■ 为什么做这个测试
+ *    实车日志（FW:0927-FILT）暴露一个恒定不对称，而且再也回不来：
+ *       进葫芦圈后  RPM1(左)≈170  RPM2(右)≈99   →  左轮恒定快 71rpm
+ *    70rpm 差 ≈ 左右各差 35rpm。按 RPM_PER_PWM_X100=550 反算：
+ *       左轮要 170/5.5 ≈ 31 PWM，右轮只要 99/5.5 ≈ 18 PWM
+ *    ⇒ 怀疑【右轮低速死区更大】：给它低 PWM 它不转，速度环只能一路往上顶，
+ *      左右差越拉越大 → 车拐成半径 ~286mm 的圆（= 用户说的"一直兜圈子"）。
+ *      几何自洽：周长 1800mm ÷ 轮距 572mm ≈ 3.15 rad ≈ 180° = 正好一圈。
+ *
+ *  ■ 这个测试给出什么判据
+ *    架空车轮，逐档给【同一个 PWM】，记录每档两轮各自的平均 rpm。
+ *    要的就是那张表：哪一档右轮还是 0 而左轮已经转起来 = 右轮死区更大。
+ *    ★必须【架空】测：落地有摩擦，死区会被地面掩盖/放大，量不准。
+ *
+ *  ★★ 2026-09-26 修正（第一次跑"小车没动"）★★
+ *    第一版扫的是 4/6/8/10/12/16 —— 【整段都太低，两轮都不转】，所以看不到任何现象。
+ *    根因：TIM2 的 Period = 100-1（见 tim.c）→ PWM 值就是【百分比】，
+ *          PWM 6 = 6% 占空比、PWM 16 = 16% —— 都在电机静摩擦死区以下。
+ *    已实测的工作点：30（≈0.4m/s）、45、60；爬行观察约 11~12 才动。
+ *    ⇒ 改成扫 6/10/14/18/24/30/40：覆盖"明显不动 → 正常转"的全区间，
+ *      每一档停留 300ms（第一版 200ms 里有 50ms 丢给过渡，样本太少）。
+ *
+ *  ■ 为什么把结果存起来最后一次性打印
+ *    本工程串口【会丢字符、长输出截断】（实测多次）。分档边测边打必然丢，
+ *    所以先在板上算好平均 rpm，全部测完再用【一行 S 行】打出来。
+ * ==========================================================================*/
+#define DZ_LEVELS     7
+#define DZ_TICKS      30     /* 每档停留 30 拍 = 300ms（丢前 5 拍过渡，取 25 拍平均）*/
+static const int16_t k_dz_pwm[DZ_LEVELS] = { 6, 10, 14, 18, 24, 30, 40 };
+static int16_t dz_rpm_l[DZ_LEVELS];
+static int16_t dz_rpm_r[DZ_LEVELS];
+static uint8_t dz_idx      = 0;      /* 当前档位 */
+static uint8_t dz_ticks    = 0;      /* 本档剩余控制拍数 */
+static uint8_t dz_sum_init = 0;
+static int32_t dz_sum_l = 0, dz_sum_r = 0;
+static uint8_t dz_n     = 0;
+
+/* 返回 1 = 全部测完（调用方据此收尾打印） */
+static uint8_t deadzone_sweep_tick(void)
+{
+  if (dz_idx >= DZ_LEVELS) return 1u;
+
+  if (dz_ticks == 0u)
+  {
+    if (dz_idx > 0u)                     /* 上一档结束：算平均 */
+    {
+      dz_rpm_l[dz_idx - 1u] = (int16_t)(dz_sum_l / (int32_t)dz_n);
+      dz_rpm_r[dz_idx - 1u] = (int16_t)(dz_sum_r / (int32_t)dz_n);
+    }
+    dz_sum_l = 0; dz_sum_r = 0; dz_n = 0;
+    motor_set_differential(k_dz_pwm[dz_idx], k_dz_pwm[dz_idx]);
+    line_follow_report_pwm(k_dz_pwm[dz_idx], k_dz_pwm[dz_idx]);
+    dz_ticks    = DZ_TICKS;
+    dz_sum_init = 0u;
+    return 0u;
+  }
+
+  dz_ticks--;
+  /* 丢前 5 拍：让电机从上一档过渡到本档，避免把瞬态算进平均 */
+  if (dz_sum_init < 5u) { dz_sum_init++; }
+  else
+  {
+    dz_sum_l += (int32_t)speed_get_rpm(MOTOR_LEFT);
+    dz_sum_r += (int32_t)speed_get_rpm(MOTOR_RIGHT);
+    dz_n++;
+  }
+  if (dz_ticks == 0u) dz_idx++;          /* 本档跑完 → 下一拍进下一档 */
+  return (dz_idx >= DZ_LEVELS) ? 1u : 0u;
+}
 #endif
 
 /* 顶层初始化: 每个外设/模块按需初始化（顺序：硬件输出 → 传感器 → 人机 → 状态机 → 遥测） */
@@ -91,11 +167,21 @@ void app_loop(void)
 #elif TEST_SPEEDLOOP_MODE == 5
       /* ★闭环不对称测试：静置 + 直行 */
       test_run_ms = (uint16_t)TEST_ASYM_MS;
+#elif TEST_SPEEDLOOP_MODE == 6
+      /* 模式 6 自己管节拍（内部状态机 + 完成后自己清零），窗口给个大值即可 */
+      test_run_ms = (uint16_t)0xFFFFu;
 #else
       test_run_ms = (uint16_t)TEST_OL_MS;
 #endif
       telemetry_trace_reset();
+#if TEST_SPEEDLOOP_MODE == 6
+      /* ★模式 6 的"还活着"证据：不管轮子转不转，这行一定会打出来。
+         用途：区分"固件没跑起来"和"固件跑了但轮子没转（PWM 太低）"。
+         用户可以只看这一行 + 最后那行 DZ 就知道测试有没有执行。 */
+      telemetry_msg("DZ sweep start: pwm 6/10/14/18/24/30/40 x300ms");
+#else
       telemetry_msg("AUTO TEST start");
+#endif
     }
   }
 #endif
@@ -136,6 +222,29 @@ void app_loop(void)
       /* ★【闭环直行+不对称】验证 WHEEL_GAIN 补偿。
          模式 3 是开环、走不到补偿代码；这个走完整速度环路径。 */
       line_follow_test_asym_cl(TEST_ASYM_PWM, TEST_SL_MAX_PWM);
+  #elif TEST_SPEEDLOOP_MODE == 6
+      /* ★【PWM 死区扫描】架空车轮，逐档同 PWM，记录两轮各自的平均 rpm。
+         判据：哪一档右轮仍为 0 而左轮已转 = 右轮死区更大 → 就是"兜圈子"的根因。
+         ★每档 300ms × 7 档 ≈ 2.1 秒（各档之间会短暂停车换挡，属正常）。 */
+      if (deadzone_sweep_tick())
+      {
+        /* 全部测完：一次性打印（一行，防丢字符）。逗号分隔，人眼/表格都好读。 */
+        char dzbuf[128];
+        (void)snprintf(dzbuf, sizeof(dzbuf),
+                       "DZ pwm=6/10/14/18/24/30/40 L=%d,%d,%d,%d,%d,%d,%d R=%d,%d,%d,%d,%d,%d,%d",
+                       (int)dz_rpm_l[0], (int)dz_rpm_l[1], (int)dz_rpm_l[2],
+                       (int)dz_rpm_l[3], (int)dz_rpm_l[4], (int)dz_rpm_l[5],
+                       (int)dz_rpm_l[6],
+                       (int)dz_rpm_r[0], (int)dz_rpm_r[1], (int)dz_rpm_r[2],
+                       (int)dz_rpm_r[3], (int)dz_rpm_r[4], (int)dz_rpm_r[5],
+                       (int)dz_rpm_r[6]);
+        telemetry_msg(dzbuf);
+        test_run_ms = 0u;
+        motor_stop();
+        line_follow_report_pwm(0, 0);
+        test_mode = 0;
+        telemetry_msg("TEST done (deadzone)");
+      }
   #else
       /* ★【开环测试】完全绕开速度 PID 与循迹 PD，直接给两轮固定 PWM。
          这样"跑得快不快/抽不抽"只取决于 电机+电源+机械，与控制器无关。 */
@@ -147,7 +256,12 @@ void app_loop(void)
 #endif
       if (test_run_ms > (uint16_t)CTRL_PERIOD_MS)
       {
+#if TEST_AUTO_OPENLOOP && (TEST_SPEEDLOOP_MODE == 6)
+        /* 模式 6 自己管节拍与结束（内部状态机），不被这个窗口砍断 */
+        test_run_ms = (uint16_t)0xFFFFu;
+#else
         test_run_ms = (uint16_t)(test_run_ms - CTRL_PERIOD_MS);
+#endif
       }
       else
       {
@@ -207,4 +321,50 @@ void app_loop(void)
 
   /* 串口命令立即处理(不受控制周期绑定) */
   telemetry_process_command();
+
+  /* ★★★ 2026-09-26 晚【轨迹黑匣子的自动回放 —— 不需要发 `Q`】★★★
+     背景：回放本来是 `Q` 指令触发的，但本车【PC→车 RX 不通】，命令发不进去
+     → 黑匣子记了也没人看得到（这正是"加诊断量却没人看见"的第三次同类问题）。
+     ⇒ 改成自动：
+        · 读秒结束时【清零】黑匣子 → 只记这一趟
+        · 跑动结束后等 ~3 秒（让它把卡住那段完整记下来）→ 自动回放
+        · 只回放一次（s_dumped 锁存），之后不再刷屏
+     ★回放内容：因为 telemetry_trace_tick 现在只在 IG=1 时记录，
+       这 600 拍全部是葫芦圈里的画面（见那里的注释）。 */
+  {
+    static uint8_t  s_dumped      = 0u;
+    static uint8_t  s_was_run     = 0u;
+    static uint8_t  s_was_count   = 0u;
+    static uint16_t s_idle_ticks  = 0u;
+    static uint16_t s_boot_ticks  = 0u;
+    car_state_t st = car_fsm_state();
+
+    if (st == CAR_COUNTDOWN)
+    {
+      s_was_count = 1u;
+      if (s_boot_ticks < 0xFFFFu) s_boot_ticks++;
+    }
+    else if (st == CAR_RUN)
+    {
+      if (s_was_count && !s_was_run)
+      {
+        telemetry_trace_reset();      /* 这一趟开始，黑匣子清零 */
+        s_boot_ticks = 0xFFFFu;       /* 已经起跑过，不再需要"从头没起跑"的判据 */
+      }
+      s_was_run  = 1u;
+      s_idle_ticks = 0u;
+    }
+    else if (s_was_run && !s_dumped)
+    {
+      s_idle_ticks++;
+      if (s_idle_ticks > 300u)        /* 停稳 ~3 秒再回放，避免边跑边刷 */
+      {
+        s_dumped = 1u;
+        telemetry_msg("--- AUTO TRACE DUMP (car stopped) ---");
+        telemetry_trace_dump();
+      }
+    }
+    /* 兜底：上电后一直没人按键启动，说明它可能不是在被测——
+       这种情况【不回放】，免得每次上电都刷 600 行。 */
+  }
 }

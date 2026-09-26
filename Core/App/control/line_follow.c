@@ -29,6 +29,18 @@ static int8_t   last_error  = 0;
 static int8_t   last_e      = 0;   /* 上一次误差(PD 微分用) */
 static uint16_t lost_cycles = 0;   /* ★uint8 会在 256 拍回绕, 把"停车防跑飞"抵消 */
 static uint8_t  line_lost   = 0;
+/* ★★★ 2026-09-26 晚【找回线后的"缓一拍"计数】★★★
+   为什么需要：黑匣子（FW:0926-TRACE）显示卡住时 PWM 在 ±99 之间反复横甩：
+     T129 PWM= 62/ -4 → T131 PWM= 71/ -1（右轮钉住不动，原地旋转）
+     → T429 PWM= 85/-18 → T433 PWM= 54/  0 → 又反向
+   机制：丢线→原地旋转找线→转回来只看到【最边一路】→ e 立刻是满量程(±7~15)
+        → corr 瞬间满舵 → 甩出去 → 又丢线 → 再旋转 = 自激振荡。
+   修法：刚找回线的那几拍，把误差【压小】，让车先稳住、再交回完整权限。 */
+static uint8_t  lost_settle = 0;
+#if USE_CORR_SLEW
+/* ★2026-09-26 晚【转向速率限制】的实际输出值（用户方案，见 app_config.h）*/
+static int16_t  s_corr_applied = 0;
+#endif
 
 /* 宽图案判定状态（十字 / 圆出口 / 交叉） */
 static uint8_t  wide_cnt    = 0;   /* 宽图案持续拍数 */
@@ -39,6 +51,8 @@ static uint8_t  s_wo_hold   = 0;   /* ★相切点强制直行剩余拍数（WID
 static int32_t  s_arc_mdeg  = 0;   /* ★同号偏航累计（毫度）—— 绕圈/相切点检测 */
 static uint8_t  s_arc_push  = 0;   /* ★反向打舵剩余拍数 */
 static int8_t   s_arc_dir   = 0;   /* ★反向打舵方向（±1）*/
+static uint16_t s_arc_exit_ticks = 0;  /* ★离开葫芦圈的累计拍数（防 IG 抖动清零累计）*/
+static uint16_t s_arc_trigs = 0;   /* ★触发次数（只增不减）—— "到底有没有跑起来"的铁证 */
 #endif
 /* ★2026-09-22 15:31 十字判据修正 + 事件计数/打印 */
 static uint16_t cross_events = 0;  /* 一趟里"判定为十字"的次数（遥测 CX=） */
@@ -105,8 +119,43 @@ static uint8_t  g7_waitmsg = 0;   /* "数够但位置不对"只打印一次 */
 static uint8_t  g7_flag    = 0;   /* 1 = 已触发过"出葫芦弯道"（锁存，给遥测显示） */
 static uint8_t  g7_turn    = 0;   /* 硬转剩余拍数（>0 = 正在硬转，期间忽略传感器） */
 
+/* ★★★ 2026-09-26 晚【控制器"决策量"的黑匣子接口】★★★
+   黑匣子（telemetry.c）原来只记 IR/RPM/PWM/GZ = 【结果】。
+   实车报"一直在绕圈"时，我无法从结果判断它到底是：
+     ① 在跑普通 PD（只是跟不住线）
+     ② 进了【丢线 → 原地旋转找线】的循环
+     ③ 被 PWM 下限 / 速度环顶住
+   这三种的修法完全不同（①调 PD ②治丢线判据 ③调下限/积分）。
+   所以把每拍的决策量也存下来，由 telemetry_trace_tick 取走记录 ——
+   下次一看 dcy（丢线计数）就能立刻分辨，不用再猜。 */
+static int8_t   dbg_e    = 0;   /* 本拍交给 PD 的误差（丢线时会被 last_error*2 覆盖）*/
+static int16_t  dbg_corr = 0;   /* 本拍算出的差速修正（已 ±99 夹过）*/
+static int16_t  dbg_sp   = 0;   /* 本拍速度基准（葫芦减速会改它）*/
+static uint16_t dbg_dcy  = 0;   /* 丢线计数（> LOST_SPIN_DELAY = 正在原地旋转）*/
+static uint8_t  dbg_flg  = 0;   /* 位标志：bit0 丢线 / bit1 在葫芦圈 / bit2 相切点直行 */
+
+void line_follow_dbg_set(int8_t e, int16_t corr, int16_t sp, uint16_t dcy, uint8_t flg)
+{
+  dbg_e = e; dbg_corr = corr; dbg_sp = sp; dbg_dcy = dcy; dbg_flg = flg;
+}
+
+void line_follow_dbg_get(int8_t *e, int16_t *corr, int16_t *sp, uint16_t *dcy, uint8_t *flg)
+{
+  if (e)    *e    = dbg_e;
+  if (corr) *corr = dbg_corr;
+  if (sp)   *sp   = dbg_sp;
+  if (dcy)  *dcy  = dbg_dcy;
+  if (flg)  *flg  = dbg_flg;
+}
+
 #if USE_D_FILTER
 static lpf_t d_lpf;
+#endif
+
+#if USE_CORR_TRIM
+/* ★2026-09-26 转向环"曲率记忆"（带泄漏的转向微调）—— 见 app_config.h 的长注释。
+   纯观测/慢修正量，不参与任何判定，随时可在 app_config.h 用一个宏关掉。 */
+static int16_t s_corr_trim = 0;
 #endif
 
 #if USE_SPEED_LOOP
@@ -284,6 +333,97 @@ void line_follow_control(int16_t base)
 {
   line_reading_t r = line_read();
   int8_t e = r.error;
+
+#if USE_GOURD_OPENLOOP
+  /* ==========================================================================
+   * ★★★ 2026-09-26 晚【葫芦圈开环跑】（用户提的方案）★★★
+   *  为什么、怎么标定、怎么回退：见 app_config.h 里 USE_GOURD_OPENLOOP 的长注释。
+   *
+   *  ★为什么放在最前面（先于起步盲直行、丢线、十字、PD 全部）：
+   *    开环期间要【完全绕开闭环】—— 否则丢线判断、十字判断、速度环积分
+   *    都会来插手，那就又不是开环了。
+   *
+   *  ★进/出条件都是【里程】(odom_distance_mm，起步时已 odom_reset)
+   *    进：OD >= GOURD_OL_START_MM
+   *    出：表走完 或 OD >= GOURD_OL_END_MM
+   * ==========================================================================*/
+  {
+    /* 步骤表：{左轮PWM, 右轮PWM} */
+    static const int16_t k_gol_steps[][2] = GOURD_OL_STEPS;
+    static const uint8_t k_gol_n =
+        (uint8_t)(sizeof(k_gol_steps) / sizeof(k_gol_steps[0]));
+
+    static uint8_t  s_gol_active = 0;    /* 1 = 正在开环 */
+    static uint8_t  s_gol_step   = 0;    /* 当前段号 */
+    static uint8_t  s_gol_ticks  = 0;    /* 本段剩余拍数 */
+    static uint8_t  s_gol_done   = 0;    /* 1 = 本趟已经跑过，不再进 */
+
+    int32_t od = odom_distance_mm();
+
+    if (!s_gol_active)
+    {
+      /* ★GOURD_OL_FROM_START=1 时不用等里程，起步后第一拍就进开环
+         （用于"只绕一个圆"的验证：这一轮根本不该先跑直线）。 */
+#if GOURD_OL_FROM_START
+      int gol_go = (!s_gol_done);
+#else
+      int gol_go = ((!s_gol_done) && (od >= (int32_t)GOURD_OL_START_MM));
+#endif
+      if (gol_go)
+      {
+        s_gol_active = 1u;
+        s_gol_step   = 0u;
+        s_gol_ticks  = (uint8_t)(GOURD_OL_STEP_MS / CTRL_PERIOD_MS);
+        { char _m[64];
+          (void)snprintf(_m, sizeof(_m), "GOL start OD=%ld step=1/%u",
+                         (long)od, (unsigned)k_gol_n);
+          telemetry_msg(_m); }
+      }
+    }
+    else
+    {
+      /* 里程保险：超了就立刻交回闭环，防跑飞 */
+      if (od >= (int32_t)GOURD_OL_END_MM) s_gol_step = k_gol_n;
+
+      if (s_gol_step >= k_gol_n)
+      {
+        s_gol_active = 0u;
+        s_gol_done   = 1u;
+        { char _m[64];
+          (void)snprintf(_m, sizeof(_m), "GOL done OD=%ld (back to closed loop)",
+                         (long)od);
+          telemetry_msg(_m); }
+      }
+      else
+      {
+        motor_set_differential(k_gol_steps[s_gol_step][0],
+                               k_gol_steps[s_gol_step][1]);
+        line_follow_report_pwm(k_gol_steps[s_gol_step][0],
+                               k_gol_steps[s_gol_step][1]);
+        /* 把循迹状态清干净，交回闭环时不会带着旧误差 */
+        last_error = 0; last_e = 0; lost_cycles = 0; line_lost = 0;
+
+        if (s_gol_ticks > 0u) s_gol_ticks--;
+        if (s_gol_ticks == 0u)
+        {
+          s_gol_step++;
+          s_gol_ticks = (uint8_t)(GOURD_OL_STEP_MS / CTRL_PERIOD_MS);
+          if (s_gol_step < k_gol_n)
+          {
+            /* ★每换一段都打印 —— 这就是【标定用的观测量】：
+               把"车走到葫芦哪个位置"和"第几段"对上，就能定这张表。 */
+            char _m[64];
+            (void)snprintf(_m, sizeof(_m), "GOL step=%u/%u OD=%ld",
+                           (unsigned)(s_gol_step + 1u), (unsigned)k_gol_n,
+                           (long)od);
+            telemetry_msg(_m);
+          }
+        }
+        return;   /* ★开环期间：直接返回，不跑任何闭环逻辑 */
+      }
+    }
+  }
+#endif /* USE_GOURD_OPENLOOP */
 
 #if USE_START_BLIND
   /* ---- ★起步盲直行（最高优先级，先于一切判据）----
@@ -578,7 +718,25 @@ void line_follow_control(int16_t base)
   }
 #endif
 
-  /* ---- 速度自适应: 直道快/弯道慢（目标速度是运行时变量, S 指令能同步改） ---- */
+  /* ---- 速度自适应: 直道快/弯道慢（目标速度是运行时变量, S 指令能同步改） ----
+     ★★★ 2026-09-26 【修】葫芦圈内禁止切到"直道速度"（e≈0 ≠ 直道）★★★
+     判据 `|e| >= CURVE_ABS_ERR_THRESH(3)` 是拿"误差大小"当"弯道"的代理，
+     这在直道/S 弯成立（弯道必然偏得多），但在【相切点】上【恰好失效】：
+       外切点处两圆共用切线 → 车身正对着线、e≈0
+       ⇒ 判据认为"这是直道" ⇒ sp 从 24 跳到 30（+6 PWM 双轮阶跃）
+       ⇒ 车在最需要"精细反转转向"的那 20~30mm 上【同时加速又突加扭矩】。
+     【实车证据】FW:0926-F20 轨迹（相切点 OD=6246，GOURD-TANGENT 打印处）：
+         T075  e=  0 cor=  0 sp=24  OD=6251
+         T076  e=  1 cor=  2 sp=30  OD=6261   ← 相切点后 15mm 速度跳到 30
+         T077  e=  0 cor=  0 sp=30  OD=6272
+       整个葫芦段 sp 在 24/30 之间反复跳（T069~T086 内 3 次），每次都是双轮 ±6 PWM 阶跃。
+     【修法】圈内(ge_in_gourd，用上一拍的值，与 line 523 的既有用法一致)
+       一律用 sp_curve；"直道速度"只在【不在圈内】时才可能选到。
+     【为什么不用 USE_GOURD_SLOWDOWN】那条路是"在 sp 上再乘系数"，
+       24×0.80=19 已经掉到电机死区(~17~20)以下 → 实测"反而过不去"。
+       本修法【不降速】，只是【不让它升速】→ 不碰死区。
+     【预期】圈内 sp 恒定 24，相切点不再有 +6 PWM 阶跃；
+       副作用为零（圈外逻辑完全没动）。回退：删掉 `&& (!ge_in_gourd)` 与后面的 else 分支。 */
   int16_t sp = base;
 #if USE_ADAPTIVE_SPEED
   if (r.active == 0)
@@ -589,9 +747,13 @@ void line_follow_control(int16_t base)
   {
     sp = sp_curve;                    /* 误差大 = 弯道, 减速 */
   }
+  else if (!ge_in_gourd)
+  {
+    sp = sp_straight;                 /* 直道（★只在圈外才认直道） */
+  }
   else
   {
-    sp = sp_straight;                 /* 直道 */
+    sp = sp_curve;                    /* ★圈内：e≈0 是相切点，不是直道 → 保持弯道速度 */
   }
 #endif
 
@@ -790,8 +952,14 @@ void line_follow_control(int16_t base)
       }
       if (moving
           && (ge_gz_fill >= (uint8_t)GOURD_IG_WINDOW)
-          && (ge_gz_sum >= (uint32_t)GOURD_IG_SUM_TH))
+          && (ge_gz_sum >= (uint32_t)((ge_in_gourd != 0u) ? GOURD_IG_HOLD_TH
+                                                          : GOURD_IG_SUM_TH)))
       {
+        /* ★2026-09-26 迟滞：已进圈就用更低的【保持】阈值（GOURD_IG_HOLD_TH）。
+           为什么必须加：清印记的路在下面 `else` 分支里 —— 只要 ig_now 掉一下，
+           圈内那些"看起来像普通线"的圆弧图案（00011000/00001100）就会在 200ms 后
+           把 ge_in_gourd 清掉 → IG 反复抖（FW:0926-G10 实测一趟抖 20+ 次）。
+           进圈阈值(SUM_TH)不变 ⇒ 直线/S 弯/直角弯的误进圈行为零变化。 */
         ig_now = 1u;
       }
     }
@@ -915,7 +1083,15 @@ void line_follow_control(int16_t base)
   if (ge_in_gourd)
   {
     if (ge_frames < 60000u) ge_frames++;
+#if (GOURD_SLOW_AFTER > 0)
     if (ge_frames >= (uint16_t)GOURD_SLOW_AFTER)
+#else
+    /* ★GOURD_SLOW_AFTER=0 表示"进圈立刻减速"。
+       这里必须用 #if 分开写：直接写 `ge_frames >= 0` 时 ge_frames 是无符号数，
+       ARMCC 会报 #186-D "pointless comparison of unsigned integer with zero"。
+       本项目要求 0 警告，所以用编译期分支消除它（语义完全一致）。 */
+    if (1)
+#endif
     {
       sp = (int16_t)((sp * GOURD_SLOW_PCT) / 100);
       if (sp < 10) sp = 10;            /* 别减到停住 */
@@ -1286,6 +1462,13 @@ void line_follow_control(int16_t base)
   }
   else
   {
+    /* ★★★ 2026-09-26 晚【找回线的那一刻：启动"缓一拍"】★★★
+       从"丢线"恢复到"看得见线"时，先把 lost_settle 置上，
+       之后 LOST_SETTLE_FRAMES 拍内把误差压到 LOST_SETTLE_ERR。
+       为什么：找线是原地旋转+满舵，刚看到线时往往只有【最边一路】
+       （IR:00000001 / 10000000），e 直接就是满量程 → 立刻满舵反向甩 →
+       又丢线 → 自激。压小这几拍，车头就能先稳下来。 */
+    if (lost_cycles > 0u) lost_settle = (uint8_t)LOST_SETTLE_FRAMES;
     last_error = r.error;
     lost_cycles = 0;
     line_lost = 0;
@@ -1324,13 +1507,25 @@ void line_follow_control(int16_t base)
            打完积分清零，等下一次同号累计 —— 即"每到半圈换一次向"。
            方向用误差的反面推出来，所以不依赖陀螺/电机的符号约定。 */
   {
-    int16_t gz = (int16_t)imu_get_gyro_z();              /* dps */
+    int16_t gz = (int16_t)imu_get_gyro_z();              /* dps；imu.c 约定 正 = 左转 */
     if (!ge_in_gourd)
     {
-      s_arc_mdeg = 0; s_arc_push = 0; s_arc_dir = 0;     /* 出圈即复位 */
+      /* ★★★ Bug1 修（2026-09-26 晚）★★★
+         原来这里【立刻】清零。但 IG（在圈判定）本来就在抖
+         （日志里 GOURD-ENTRY mark set/cleared 反复交替），
+         每闪一下就把辛苦攒的偏航抹掉 → 阈值永远到不了 → 【机制从未触发过】。
+         ⇒ 改成"离开葫芦圈要连续 EXIT_HOLD 拍才复位"，闪一下不算离开。
+         打舵进行中(s_arc_push)绝不复位，保证一次脱困动作能打完。 */
+      if (s_arc_push == 0u)
+      {
+        if (s_arc_exit_ticks < (uint16_t)GOURD_ARC_EXIT_HOLD) s_arc_exit_ticks++;
+        else { s_arc_mdeg = 0; s_arc_dir = 0; }
+      }
     }
     else
     {
+      s_arc_exit_ticks = 0u;                             /* 还在圈里：保持计时器归零 */
+
       if ((gz > GOURD_ARC_DB_DPS) || (gz < -GOURD_ARC_DB_DPS))
         s_arc_mdeg += (int32_t)gz * 10;                  /* dps×10ms = 0.01° = 10 毫度 */
       else
@@ -1343,17 +1538,29 @@ void line_follow_control(int16_t base)
       else if ((s_arc_mdeg > (int32_t)GOURD_ARC_FLIP_MDEG) ||
                (s_arc_mdeg < -(int32_t)GOURD_ARC_FLIP_MDEG))
       {
-        if (last_error != 0)                             /* 方向 = 当前误差的【反面】 */
+        /* ★★★ Bug2 修（2026-09-26 晚）★★★
+           原来用 `(last_error > 0) ? -1 : 1`（当前【线位置】的反面）。
+           但相切点处线 C¹ 连续、车基本居中（|e| 很小），
+           按线位置取反在某些相位会【顺着原来的转向推】→ 锁得更死。
+           正确依据是【车实际在往哪边转】= 偏航累计的符号：
+             imu.c 约定 gz>0 = 左转 → 一直往左绕则 mdeg>0
+             ⇒ 往左绕就【往右推】(e<0, dir=-1)；往右绕就【往左推】(e>0, dir=+1)
+           ★与"抓一个反向硬转向指令"的区别：这里只给一个固定偏置，
+             让 P 项自己去收敛，不需要额外标定，也不会发散。 */
+        s_arc_dir  = (int8_t)((s_arc_mdeg > 0) ? -1 : 1);
+        s_arc_push = (uint8_t)GOURD_ARC_FLIP_MAX;
+        s_arc_trigs++;                                   /* ★触发计数（只增不减）*/
         {
-          s_arc_dir  = (int8_t)((last_error > 0) ? -1 : 1);
-          s_arc_push = (uint8_t)GOURD_ARC_FLIP_MAX;
+          /* ★先把触发时的累计值记下来再清零 —— 否则日志里永远是 mdeg=0，
+             就看不出"到底攒到多少才触发"（调阈值全靠这个数）。 */
+          int32_t trig_mdeg = s_arc_mdeg;
+          char    _m[96];
           s_arc_mdeg = 0;                                /* 清零，等下一次同号累计 */
-          {
-            char _m[80];
-            (void)snprintf(_m, sizeof(_m), "GOURD-ARC: flip dir=%d OD=%ld GW=%d",
-                           (int)s_arc_dir, (long)odom_distance_mm(), (int)gourd_waves);
-            telemetry_msg(_m);
-          }
+          (void)snprintf(_m, sizeof(_m),
+                         "GOURD-ARC: flip dir=%d mdeg=%ld OD=%ld GW=%d",
+                         (int)s_arc_dir, (long)trig_mdeg,
+                         (long)odom_distance_mm(), (int)gourd_waves);
+          telemetry_msg(_m);
         }
       }
     }
@@ -1438,15 +1645,152 @@ void line_follow_control(int16_t base)
 #endif
 #endif
 
+  /* ★★★ 2026-09-26 晚【找回线后的"缓一拍"】—— 治丢线自激振荡 ★★★
+     放在 PD 之前、所有覆盖（十字/相切点/翻转）之后：这是对最终误差的统一限幅。
+     依据（黑匣子 FW:0926-TRACE，卡住那段 15 拍内在 ±99 之间反复横甩）：
+       T129 PWM= 62/ -4  IR:00000011   ← 只有最边一路亮
+       T131 PWM= 71/ -1  IR:00000001   ← 右轮钉住不动 = 原地旋转
+       T429 PWM= 85/-18  IR:00000001
+     机制：原地旋转找线时【只看到最边一路】，e 立刻是满量程 → corr 满舵 → 甩出去
+          → 又丢线 → 再旋转。压小这几拍，让车先稳住再交回完整权限。
+     ★只在"刚从丢线恢复"时生效（lost_settle>0），正常循迹完全不受影响。 */
+  if (lost_settle > 0u)
+  {
+    lost_settle--;
+    if (e >  (int8_t)LOST_SETTLE_ERR)  e =  (int8_t)LOST_SETTLE_ERR;
+    if (e < -(int8_t)LOST_SETTLE_ERR)  e = -(int8_t)LOST_SETTLE_ERR;
+  }
+
   /* ---- PD 差速校正 ---- */
 #if USE_D_FILTER
   e = (int8_t)lpf_update(&d_lpf, (float)e);   /* 对误差低通, 压 D 项高频噪声 */
 #endif
   int16_t d_term = (int16_t)(e - last_e);
-  int16_t corr   = (int16_t)((kp_x10 * e) / 10 + (kd_x10 * d_term) / 10);
+  int16_t corr_pd = (int16_t)((kp_x10 * e) / 10 + (kd_x10 * d_term) / 10);
   last_e = e;
+
+#if USE_CORR_TRIM
+  /* ★★★ 2026-09-26 转向环"曲率记忆"（带泄漏的转向微调）★★★
+     第 2 版：增长/衰减【不对称】。为什么、定量预期、怎么回退：
+     见 app_config.h 里 USE_CORR_TRIM 的长注释（含第 1 版实车失败的教训）。
+     一句话：纯 PD 在圆上必须维持 e_ss = D_req/KP 的恒定偏差才能顶住转弯差速，
+     而葫芦圈相切点要求转向【反号】→ 误差得先扫过 ±e_ss 才翻得过来。
+     这里把"当前需要的恒定差速"记下一部分，让 P 项不必独自顶它。
+
+     ★不对称是关键（第 1 版就栽在这里）：
+       UP 慢：只有【持续】的转弯需求才攒得起来，噪声/单拍闪烁攒不动。
+       DOWN 快：需求一反向（相切点！）立刻放手，不与新需求对抗。
+       改之前必须先看 app_config.h 里那条不变式 DOWN > UP。 */
+  float trim_err = (float)corr_pd - (float)s_corr_trim;
+  if (trim_err > 0.0f) s_corr_trim = (int16_t)((float)s_corr_trim + trim_err * CORR_TRIM_UP);
+  else                 s_corr_trim = (int16_t)((float)s_corr_trim + trim_err * CORR_TRIM_DOWN);
+  /* 泄漏：没有任何转弯需求时归 0，防止残留差速把直道带偏 */
+  if (s_corr_trim > 0)      s_corr_trim = (int16_t)((float)s_corr_trim - CORR_TRIM_LEAK);
+  else if (s_corr_trim < 0) s_corr_trim = (int16_t)((float)s_corr_trim + CORR_TRIM_LEAK);
+  if (s_corr_trim >  CORR_TRIM_MAX) s_corr_trim =  CORR_TRIM_MAX;
+  if (s_corr_trim < -CORR_TRIM_MAX) s_corr_trim = -CORR_TRIM_MAX;
+
+  int16_t corr = (int16_t)(corr_pd + s_corr_trim);
+#else
+  int16_t corr = corr_pd;
+#endif
   if (corr >  99) corr =  99;
   if (corr < -99) corr = -99;
+
+#if USE_CORR_SLEW
+  /* ==========================================================================
+   * ★★★ 2026-09-26 晚【转向速率限制】（用户提的方案）★★★
+   *  用户原话："把转向改为逐渐增加的过程……比如说你原本是直行的，根据红外传感器
+   *            的数据得知现在转速要为20，你不要直接加到20，而是逐渐增加；
+   *            但左右转的话就要突变。比如说本来往左转20，现在要往右转20，
+   *            你直接转速清零，再逐渐增加到右转20"
+   *
+   *  ★为什么它正好打在病根上（这次的实测现象）：
+   *    用户："葫芦圈是能过的，但是【转头太猛了，经常就容易丢线】"
+   *    ⇒ 问题不是修正【力度】不对（能过说明力度够），而是【变化速率】太快 ——
+   *      一圈 10ms 内差速从 −30 跳到 +30，车头被猛推 → 冲离线 → 丢线。
+   *
+   *  ★规则（按用户要求，两条不对称）：
+   *    ① 同向变化（或从 0 起步）→ 每拍最多变 CORR_SLEW_STEP，逐渐逼近
+   *    ② 反向变化（左转↔右转）→ 【先瞬间清零】，再从 0 逐渐向新方向增加
+   *    ⇒ 这正好避免了"−30 直接跳到 +30"的猛甩，又不牺牲"换向必须及时"
+   *      （反向时第一拍就到 0，方向已经对了，只是幅度慢慢给）。
+   *
+   *  ★与 D 项的关系：这不是替代 KD，而是给转向【输出】加一级速率限制。
+   *    PD 仍按原样算（该给多少给多少），只是"给的速度"受控。
+   *  ★回退：USE_CORR_SLEW 改 0（行为 = 0926-D125）。 */
+  {
+    uint8_t want_up   = (uint8_t)(corr > 0);
+    uint8_t have_up   = (uint8_t)(s_corr_applied > 0);
+    uint8_t reversing = (uint8_t)((corr != 0) && (s_corr_applied != 0) &&
+                                  (want_up != have_up));
+
+    if (reversing)
+    {
+      s_corr_applied = 0;                 /* ② 反向：先清零（瞬间完成）*/
+    }
+    else
+    {
+      int16_t d = (int16_t)(corr - s_corr_applied);
+      if (d >  (int16_t)CORR_SLEW_STEP) d =  (int16_t)CORR_SLEW_STEP;
+      if (d < -(int16_t)CORR_SLEW_STEP) d = -(int16_t)CORR_SLEW_STEP;
+      s_corr_applied = (int16_t)(s_corr_applied + d);
+    }
+    corr = s_corr_applied;                /* 用限速后的值去算轮速 */
+  }
+#endif
+
+  /* ★★★ 2026-09-26 【诊断·只打印，不改任何动作】相切点"分叉"观测 ★★★
+     【为什么要看这个】用户最新实车结论："在第 1 个圈里绕了一圈，在第 3 个圈里绕了一圈"
+       —— 不是卡死，是【每个圆多跑一圈】。这正好是"相切点没跨过去"的定义：
+          跨过去了就是 1 圈，没跨过去就顺着原圆再绕 1 圈（下一圈再试，所以是"多一圈"）。
+
+     【几何：相切点到底能不能被看见】两个外切圆（R=300）在切点处共用一条切线——
+       切点【正下方】只有一条线；切点【正上方】线会【分叉成 Y】：两支的横向间距
+         Δ = d² / (2R)   （d = 离切点的纵向距离）
+       d=50mm → Δ=4mm；d=100mm → Δ=17mm；d=145mm → Δ=35mm（≈传感条最外一路的横向位置）。
+       ⇒ 在切点 ±145mm 内，两支是【贴在一起的一坨】，看起来只是"线稍微变粗"
+         ⇒ 宽度判据(CROSS/wide_one)天然看不见 → 这解释了为什么老路线失败三次。
+       ⇒ 但在【分叉已经张开】的那几十毫米上，位图会出现【两个分离的团(n=2)】！
+
+     【这个打印要回答的问题】切点附近到底有没有出现 n>=2 的分叉？
+       · 有 → 那就有了一个【可靠、几何上必然存在】的相切点标志（比宽度判据硬），
+              下一轮可以做"到分叉就强制反向转向"。
+       · 没有 → 分叉张开得太快/太靠后，只能靠里程+陀螺，宽度类判据彻底放弃。
+
+     【为什么是纯打印】本会话已经因为"机制没验证就先动作"栽过多次
+       （ARC_FLIP 三个阈值全失败、wide_one 三次失败）。先把现象测出来再动手。
+     【零风险】不动 e/corr/sp/PWM 任何一个字节。回退：删掉本块。 */
+  {
+    static uint8_t s_fork_prev = 0u;
+    static int32_t s_fork_od   = 0;
+    uint8_t nblob = 0u;
+    uint8_t prevbit = 0u;
+    uint8_t i;
+
+    for (i = 0u; i < (uint8_t)LINE_CHANNELS; i++)
+    {
+      uint8_t b = (uint8_t)((r.raw >> i) & 1u);
+      if (b && (prevbit == 0u)) nblob++;          /* 连续 1 的段数 = 几个团 */
+      prevbit = b;
+    }
+
+    if ((nblob >= 2u) && (s_fork_prev == 0u) && ge_in_gourd && (!line_lost)
+        && ((odom_distance_mm() - s_fork_od) >= 150))   /* 同一处只报一次 */
+    {
+      char fm[72];
+      char irs[LINE_CHANNELS + 1];
+      for (i = 0u; i < (uint8_t)LINE_CHANNELS; i++)
+        irs[i] = ((r.raw >> i) & 1u) ? '1' : '0';
+      irs[LINE_CHANNELS] = '\0';
+      s_fork_od = odom_distance_mm();
+      (void)snprintf(fm, sizeof(fm), "FORK IR=%s n=%d e=%3d c=%3d sp=%2d OD=%ld",
+                     irs, (int)nblob, (int)e, (int)corr, (int)sp,
+                     (long)odom_distance_mm());
+      telemetry_msg(fm);
+    }
+    s_fork_prev = (nblob >= 2u) ? 1u : 0u;
+  }
 
   int16_t m1 = sp + corr;         /* 左轮: 线偏右时加速 */
   int16_t m2 = sp - corr;         /* 右轮: 线偏右时减速 */
@@ -1469,10 +1813,26 @@ void line_follow_control(int16_t base)
        → 输出被顶到 99 → 两轮满油门窜出去（"莫名其妙猛冲"），等测速追上才回落。
      有了它：静止时 目标=实测 → 输出 = 前馈（= 开环那个 PWM 值）→ 起步平顺，
        而且积分项不必再顶到上限，稳态误差也随之变小。
-     ★2026-09-26 加左右轮效率补偿：前馈按各自增益缩放（见 WHEEL_GAIN_*）。
-       偏弱的轮子多给 PWM，这样速度环不用靠积分去追大偏差。 */
-  spd_pid[0].bias = (float)m1 * WHEEL_GAIN_L;
-  spd_pid[1].bias = (float)m2 * WHEEL_GAIN_R;
+     ★2026-09-26 加左右轮效率补偿：补偿【只加在最终输出上】（见下面 1834 行）。
+       前馈这里【不要再乘】—— 曾经两处都乘，等效增益变成 1.232。 */
+  /* ★★★ 2026-09-26 【修一个"补偿被加了两次"的 bug】★★★
+     原来这里是 `bias = m1 * WHEEL_GAIN_L`，而下面 1834 行【又】乘了一次
+     `m1 = o1 * WHEEL_GAIN_L` ⇒ 左轮实际补偿 = 1.11 × 1.11 = **1.232（+23.2%）**，
+     而 app_config.h 里 WHEEL_GAIN_L=1.11 的依据是【实测左轮弱 11.5%】——
+     也就是说【多补了一倍】，左轮被多给了 10.5% 的 PWM。
+
+     ★为什么这就是"车一直往右（顺时针）"的根因：
+       左轮多给 10.5% → 左轮偏快 → 车【恒定向右偏】。
+       用户多趟反馈都指向同一件事："一直往右（顺时针）"、
+       "第 1 个圈绕一圈、第 3 个圈绕一圈"（1→2 和 3→4 是【同一类换向】，
+       恒定偏置正好只在其中一类换向上失败）。
+     ★为什么只删这一处、保留下面那处：
+       `out = G*(bias + acc)` 已经把 bias 一并缩放过了，
+       所以【单独缩放 bias 是多余的】；而且只缩放 bias 的话，积分修正不会被缩放。
+       保留"缩放最终输出"⇒ 等效增益正好 = 1.11，与文档一致。
+     ★回退：把这两行改回 `(float)m1 * WHEEL_GAIN_L` / `(float)m2 * WHEEL_GAIN_R`。 */
+  spd_pid[0].bias = (float)m1;
+  spd_pid[1].bias = (float)m2;
 #endif
   {
     float dt = (float)CTRL_PERIOD_MS / 1000.0f;
@@ -1515,6 +1875,23 @@ void line_follow_control(int16_t base)
     if (m2 > WHEEL_FLOOR_MIN_CMD  && m2 < (int16_t)WHEEL_PWM_FLOOR) m2 = (int16_t)WHEEL_PWM_FLOOR;
     if (m2 < -WHEEL_FLOOR_MIN_CMD && m2 > -(int16_t)WHEEL_PWM_FLOOR) m2 = -(int16_t)WHEEL_PWM_FLOOR;
 #endif
+    /* ★★★ 2026-09-26 晚【把控制器的"决策"记进黑匣子】★★★
+       为什么必须加：黑匣子原来只记 IR/RPM/PWM/GZ —— 那些是【结果】。
+       实车"一直在绕圈"时，我无法从结果判断它到底是
+         ① 在跑普通 PD（只是跟不住线）
+         ② 进了【丢线→原地旋转找线】的循环
+         ③ 被 PWM 下限/速度环顶住
+       这三种的修法完全不同。所以把决策量也记下来：
+         e   = 本拍交给 PD 的误差（丢线时它会被 last_error*2 覆盖）
+         cor = 本拍算出的差速修正（±99 夹过）
+         sp  = 本拍的速度基准（葫芦减速会改它）
+         dcy = 丢线计数（0 = 没丢线；>LOST_SPIN_DELAY = 正在原地旋转）
+         flg = 位标志：bit0 丢线中 / bit1 在葫芦圈 / bit2 相切点直行窗口
+       ★这样一看 dcy 就知道"是不是在反复原地旋转"，不用再猜。 */
+    line_follow_dbg_set(e, corr, sp, (uint16_t)lost_cycles,
+                        (uint8_t)((line_lost ? 1u : 0u) |
+                                  (line_follow_in_gourd() ? 2u : 0u) |
+                                  (s_wo_hold ? 4u : 0u)));
   }
 #endif
 
@@ -1857,13 +2234,18 @@ void line_follow_test_asym_cl(int16_t pwm, int16_t max_pwm)
 
   if (t_run < TEST_ASYM_RUN_MS)
   {
+    /* ★t / dt / o1 / o2 只在闭环分支里用得到；USE_SPEED_LOOP=0 时
+       一并放进 #if 里，避免"声明未使用"警告（本项目要求 0 警告）。 */
+#if USE_SPEED_LOOP
     float t  = (float)((int32_t)ref * (int32_t)RPM_PER_PWM_X100) / 100.0f;
     float dt = (float)CTRL_PERIOD_MS / 1000.0f;
     float o1, o2;
+#endif
     int16_t m1, m2;
 
     t_run = (uint16_t)(t_run + CTRL_PERIOD_MS);
 
+#if USE_SPEED_LOOP
     /* 与正常循迹完全相同的路径：前馈(带增益) + PID + 输出增益 */
     spd_pid[0].bias = (float)ref * WHEEL_GAIN_L;
     spd_pid[1].bias = (float)ref * WHEEL_GAIN_R;
@@ -1873,6 +2255,14 @@ void line_follow_test_asym_cl(int16_t pwm, int16_t max_pwm)
     m2 = (int16_t)(o2 * WHEEL_GAIN_R);
     if (m1 > max_pwm) m1 = max_pwm; if (m1 < 0) m1 = 0;
     if (m2 > max_pwm) m2 = max_pwm; if (m2 < 0) m2 = 0;
+#else
+    /* ★2026-09-26 晚：USE_SPEED_LOOP=0 时 spd_pid / pid_update 不存在 →
+       这个"闭环不对称测试"没法跑，降级成【同 PWM 开环直行】（仍有意义：
+       它量的就是左右轮机械差异本身，本来也不该依赖速度环）。 */
+    m1 = (int16_t)ref; m2 = (int16_t)ref;
+    if (m1 > max_pwm) m1 = max_pwm; if (m1 < 0) m1 = 0;
+    if (m2 > max_pwm) m2 = max_pwm; if (m2 < 0) m2 = 0;
+#endif
 
     pwm_out[0] = m1; pwm_out[1] = m2;
     motor_set_differential(m1, m2);
@@ -2130,6 +2520,32 @@ uint8_t line_follow_in_gourd(void)
 #endif
 }
 
+/* ★★★ 2026-09-26 晚【绕圈脱困的可观测性】★★★
+   为什么必须把它打到串口：这个机制之前"开了等于没开"，
+   而实车现象又和上一版【一模一样】—— 没有可观测的量，就只能盲改。
+   这两个 getter 让下面两件事一眼可辨：
+     · AR= 累计值一直很小/反复归零  → 累加器仍被清零（IG 抖动或死区问题）
+     · AN= 恒为 0                    → 【机制从未触发过】
+     · AN>0 但车仍绕圈               → 触发过，但推的方向/力度不对（另一条线）
+   AR 单位 = 毫度；阈值 = GOURD_ARC_FLIP_MDEG。 */
+int32_t line_follow_arc_mdeg(void)
+{
+#if GOURD_ARC_FLIP
+  return s_arc_mdeg;
+#else
+  return 0;
+#endif
+}
+
+uint16_t line_follow_arc_trigs(void)
+{
+#if GOURD_ARC_FLIP
+  return s_arc_trigs;
+#else
+  return 0u;
+#endif
+}
+
 /* ★★★ 新的一趟开始：给"出圈右转"重新上膛（一次性锁存复位）★★★
      由 car_fsm.c 在 CAR_RUN 入口、紧跟 odom_reset() 之后调用。
 
@@ -2191,14 +2607,23 @@ void line_follow_init(void)
   last_e      = 0;
   lost_cycles = 0;
   line_lost   = 0;
+  lost_settle = 0;   /* ★找回线后的"缓一拍"计数 */
+#if USE_CORR_SLEW
+  s_corr_applied = 0;   /* ★转向速率限制：启动清零 */
+#endif
   wide_cnt    = 0;
   on_cross    = 0;
   wide_long   = 0;
   s_wo_hold   = 0;   /* ★相切点强制直行窗口 */
+#if USE_CORR_TRIM
+  s_corr_trim = 0;   /* ★转向环曲率记忆：每次启动清零，绝不带上一次的残留差速 */
+#endif
 #if GOURD_ARC_FLIP
   s_arc_mdeg  = 0;   /* ★绕圈脱困：偏航积分/打舵状态 */
   s_arc_push  = 0;
   s_arc_dir   = 0;
+  s_arc_exit_ticks = 0;
+  s_arc_trigs = 0;
 #endif
 #if USE_STRAIGHT_BOOST
   straight_cycles = 0;   /* 只在提速开着时才存在（见顶部声明的 #if） */

@@ -161,7 +161,19 @@ void MX_TIM3_Init(void)
        可滤掉 <~4.3µs 的毛刺；而编码器最高频率约 6.5kHz(465RPM×14沿)，
        每个脉冲 154µs —— 绝不会误滤真实脉冲。
      ★放在 USER CODE 段：CubeMX 重新生成时不会覆盖
-       （本项目有"CubeMX 重新生成破坏工程"的前车之鉴，务必保持在这里）。 */
+       （本项目有"CubeMX 重新生成破坏工程"的前车之鉴，务必保持在这里）。
+     ★★★ 2026-09-26 【重要修正】★★★
+       上一版只在这里设了 0x0F —— 但【不生效】！
+       原因：HAL_TIM_Encoder_Init 内部（stm32f1xx_hal_tim.c:3097）才是真正写
+             CCMR1 的地方：
+                 tmpccmr1 |= (sConfig->IC1Filter << 4) | (sConfig->IC2Filter << 12);
+             而本函数下方 CubeMX 生成的那几行
+                 sConfig.IC1Filter = 0;  sConfig.IC2Filter = 0;
+             会把这里设的值【覆盖回 0】，然后才调用 HAL。
+       实车铁证：修完"滤波"后 RPM 仍能报 747（10ms 窗口物理上限 213）、
+                上一拍 28 下一拍 462（一个跟斗 15ms、双电机堵转都做不到）。
+       ⇒ 修法：下面那两行已一并改成 0x0F；另在 encoder_start() 里启动后再补写一次
+         （双保险，且不怕将来再被 CubeMX 覆盖）。 */
   sConfig.IC1Filter = 0x0F;
   sConfig.IC2Filter = 0x0F;
 
@@ -176,11 +188,12 @@ void MX_TIM3_Init(void)
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC1Filter = 0;
+  sConfig.IC1Filter = 0x0F;   /* ★2026-09-26 修：这里原来是 0，把上面 USER CODE 段里
+                                 设好的 0x0F 【覆盖回 0】→ 滤波从未生效（见上面长注释）*/
   sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC2Filter = 0;
+  sConfig.IC2Filter = 0x0F;   /* ★同上 */
   if (HAL_TIM_Encoder_Init(&htim3, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -226,11 +239,11 @@ void MX_TIM4_Init(void)
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC1Filter = 0;
+  sConfig.IC1Filter = 0x0F;   /* ★2026-09-26 修：原来这里是 0，覆盖掉了上面的 0x0F */
   sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC2Filter = 0;
+  sConfig.IC2Filter = 0x0F;   /* ★同上（两轮必须一致）*/
   if (HAL_TIM_Encoder_Init(&htim4, &sConfig) != HAL_OK)
   {
     Error_Handler();

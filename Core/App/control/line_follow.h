@@ -37,6 +37,21 @@ uint16_t line_follow_gourd_exit_events(void);
 float    line_follow_gourd_exit_last_deg(void);
 /* ★当前是否在葫芦圈里(遥测 GD 旁边用来核对) —— 出圈闸门与丢线屏蔽都用它 */
 uint8_t  line_follow_in_gourd(void);
+/* ★2026-09-26 晚：绕圈脱困的可观测性（打进遥测 AR=/AN=）
+   AR = 同号偏航累计（毫度，阈值见 GOURD_ARC_FLIP_MDEG）
+   AN = 脱困触发次数（只增不减；恒为 0 = 机制从未跑起来） */
+int32_t  line_follow_arc_mdeg(void);
+uint16_t line_follow_arc_trigs(void);
+
+/* ★★★ 2026-09-26 晚【控制器决策量的黑匣子接口】★★★
+   黑匣子原来只记 IR/RPM/PWM/GZ（结果）。实车"一直在绕圈"时无法判断是
+   "跟不住线"还是"在丢线原地旋转" —— 两者修法完全不同。
+   这里把每拍的关键决策量交给 telemetry_trace_tick 记录：
+     e    = 交给 PD 的误差        corr = 算出的差速修正
+     sp   = 速度基准              dcy  = 丢线计数（>LOST_SPIN_DELAY = 正在原地旋转）
+     flg  = bit0 丢线 / bit1 在葫芦圈 / bit2 相切点直行 */
+void line_follow_dbg_set(int8_t e, int16_t corr, int16_t sp, uint16_t dcy, uint8_t flg);
+void line_follow_dbg_get(int8_t *e, int16_t *corr, int16_t *sp, uint16_t *dcy, uint8_t *flg);
 /* ★★ 新的一趟开始：给"出圈右转"重新上膛（一次性锁存复位）。
    car_fsm.c 在 CAR_RUN 入口、紧跟 odom_reset() 之后调用。
    ★必须在每趟起步时调 —— 否则第二趟就不会再右转了。 */
