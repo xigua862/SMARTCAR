@@ -1487,6 +1487,28 @@ void line_follow_control(int16_t base)
     /* 按原符号分别夹到 ±99（缩放后再夹，避免 99×1.11 溢出） */
     if (m1 >  99) m1 =  99; if (m1 < -99) m1 = -99;
     if (m2 >  99) m2 =  99; if (m2 < -99) m2 = -99;
+
+#if WHEEL_PWM_FLOOR
+    /* ★★★ 2026-09-26 【PWM 下限：防左轮掉进启动死区】★★★
+       实车数据（FW:0926-1900，葫芦圈段 407 样本）：左轮 RPM1 < 30 的拍数占 21%
+       （其中 =0 占 12%），而同拍右轮 RPM2 > 100 —— 左轮有 1/5 时间【基本停转】，
+       车被右轮推着偏转。这就是葫芦圈跑 10.9m（真正只要 1.8~2m）的原因。
+
+       机理：直流电机有启动死区（静摩擦 > 电磁力矩时不动）。左轮摩擦大 → 死区更高。
+       速度环在低目标时算出很低的 PWM → 左轮停转 → 环看到"转速=0"又猛加 →
+       起转 → 过冲 → 再降 → 停转 = 走走停停。
+
+       修法：要求前进时给 PWM 一个下限，防止掉进死区。
+       ★关键安全阀：|命令| < WHEEL_FLOOR_MIN_CMD 时【不抬】——
+         否则"发 0 停车"会被抬成 12 变成"永远在爬"，
+         丢线旋转(±LOST_SPIN_SPEED)、急停、终点停车全会失效。
+         同时 FLOOR 必须 < MIN_CMD，否则 0 也会被抬起来。
+       ★这是治标：根因在左轮机械。修好机械后把 WHEEL_PWM_FLOOR 改 0。 */
+    if (m1 > WHEEL_FLOOR_MIN_CMD  && m1 < (int16_t)WHEEL_PWM_FLOOR) m1 = (int16_t)WHEEL_PWM_FLOOR;
+    if (m1 < -WHEEL_FLOOR_MIN_CMD && m1 > -(int16_t)WHEEL_PWM_FLOOR) m1 = -(int16_t)WHEEL_PWM_FLOOR;
+    if (m2 > WHEEL_FLOOR_MIN_CMD  && m2 < (int16_t)WHEEL_PWM_FLOOR) m2 = (int16_t)WHEEL_PWM_FLOOR;
+    if (m2 < -WHEEL_FLOOR_MIN_CMD && m2 > -(int16_t)WHEEL_PWM_FLOOR) m2 = -(int16_t)WHEEL_PWM_FLOOR;
+#endif
   }
 #endif
 
