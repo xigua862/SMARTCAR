@@ -21,6 +21,7 @@
 #if USE_GOURD_EXIT
 #include "drivers/encoder.h"   /* ★出口右转的距离兜底 */
 #include "drivers/odom.h"      /* ★出口判据③：按里程强制右转（进圈起算的净位移） */
+#include "usart.h"             /* ★2026-09-26 诊断摘要直接走 huart1（telemetry_msg 不支持格式串） */
 #endif
 
 /* 丢线/上次误差状态 */
@@ -112,6 +113,10 @@ static lpf_t d_lpf;
 static pid_t spd_pid[2];   /* 左右轮速度环(编码器闭环) */
 static float  tgt_rpm[2] = {0, 0};
 #endif
+
+/* ★2026-09-26 【诊断用】：最近一次真正下发给电机的 PWM。
+   纯观测、不参与控制。用途见 line_follow_last_pwm() 的说明（头文件里）。 */
+static int16_t pwm_out[2] = {0, 0};
 
 /* ===========================================================================
  * ★★★ 葫芦圈【出口】检测（2026-09-23 用户实测特征）
@@ -340,6 +345,13 @@ void line_follow_control(int16_t base)
         {
           if (bm & (uint16_t)(1u << i)) { if (L == 0xFFu) L = i; R = i; cnt++; }
         }
+        /* ★2026-09-26 【最宽上限】—— 见 app_config.h 的 CROSS_ACTIVE_MAX 长注释。
+           7~8 路全亮 = 厚黑块/交叉（线材横穿传感条），几何上不可能是相切点
+           （相切点是"线整段横移"→ 2~5 路）。实车 13 次触发里有 7 次是 7~8 路的
+           厚黑块 → 直行窗口在错误位置打开 → 多绕约 7.5 米。
+           ★只卡【多路图案】这一路(r.raw)；1kHz 那帧是时间过采样出来的"最宽帧"，
+             加限会误伤，所以保留原判据（双路仍是"任一命中即成立"）。 */
+        if ((pass == 0u) && (cnt > (uint8_t)CROSS_ACTIVE_MAX)) continue;
         if ((L != 0xFFu) && (cnt >= (uint8_t)CROSS_ACTIVE_MIN))
         {
           uint8_t tL = (L == 0u)                   ? 1u : 0u;
@@ -1450,19 +1462,38 @@ void line_follow_control(int16_t base)
      没有它的时候：起步瞬间 目标=236RPM、实测=0 → P 项 = 0.4×236 ≈ 94
        → 输出被顶到 99 → 两轮满油门窜出去（"莫名其妙猛冲"），等测速追上才回落。
      有了它：静止时 目标=实测 → 输出 = 前馈（= 开环那个 PWM 值）→ 起步平顺，
-       而且积分项不必再顶到上限，稳态误差也随之变小。 */
-  spd_pid[0].bias = (float)m1;
-  spd_pid[1].bias = (float)m2;
+       而且积分项不必再顶到上限，稳态误差也随之变小。
+     ★2026-09-26 加左右轮效率补偿：前馈按各自增益缩放（见 WHEEL_GAIN_*）。
+       偏弱的轮子多给 PWM，这样速度环不用靠积分去追大偏差。 */
+  spd_pid[0].bias = (float)m1 * WHEEL_GAIN_L;
+  spd_pid[1].bias = (float)m2 * WHEEL_GAIN_R;
 #endif
   {
     float dt = (float)CTRL_PERIOD_MS / 1000.0f;
-    m1 = (int16_t)pid_update(&spd_pid[0], tgt_rpm[0], (float)speed_get_rpm(MOTOR_LEFT),  dt);
-    m2 = (int16_t)pid_update(&spd_pid[1], tgt_rpm[1], (float)speed_get_rpm(MOTOR_RIGHT), dt);
+    float o1 = pid_update(&spd_pid[0], tgt_rpm[0], (float)speed_get_rpm(MOTOR_LEFT),  dt);
+    float o2 = pid_update(&spd_pid[1], tgt_rpm[1], (float)speed_get_rpm(MOTOR_RIGHT), dt);
+
+    /* ★2026-09-26 左右轮效率补偿：最终输出也按增益缩放。
+       ★为什么"目标转速不缩放、只缩放输出"：
+         手的判别测试证明【编码器是准的】（同样物理位移下两轮读数只差 1.73%）
+         → 左轮 119RPM 就是真的只转 119RPM，不是"尺子不准"。
+         所以目标必须仍然是 132RPM；如果去缩放目标，会让控制器以为"到了"
+         而不再修正，左轮就真的永远慢 11.5%。缩放输出才是"多给 PWM"的正确做法。
+       ★代价：等效环路增益被乘了 1.11 → 略微提高振荡倾向。
+         若实测发现抖，把 SPD_PID_KP 相应降到 0.4/1.11 ≈ 0.36 抵消。 */
+    m1 = (int16_t)(o1 * WHEEL_GAIN_L);
+    m2 = (int16_t)(o2 * WHEEL_GAIN_R);
+
+    /* 按原符号分别夹到 ±99（缩放后再夹，避免 99×1.11 溢出） */
     if (m1 >  99) m1 =  99; if (m1 < -99) m1 = -99;
     if (m2 >  99) m2 =  99; if (m2 < -99) m2 = -99;
   }
 #endif
 
+  /* ★2026-09-26 诊断：记下"真正下发给电机的 PWM"，遥测 PWM=l/r 打出来。
+     放在 motor_set_differential 之前，保证与电机收到的值完全一致。 */
+  pwm_out[0] = m1;
+  pwm_out[1] = m2;
   motor_set_differential(m1, m2);
 
 #if USE_GOURD_SM && GOURD_USE_FLIP
@@ -1473,6 +1504,503 @@ void line_follow_control(int16_t base)
 void line_follow_stop(void)
 {
   motor_stop();
+}
+
+/* ★2026-09-26 诊断用：取"最近一次下发给电机的 PWM"（遥测 PWM=l/r）。
+   为什么需要它：排查"一抽一抽"时只看 RPM 反推 PWM 无法区分两种解释 ——
+     · 电机在带载下不响应（PWM 高但转速低）
+     · 控制器根本没出力（PWM 低但误差大）
+   打了这个字段就能直接分岔。纯观测，不参与控制。 */
+void line_follow_last_pwm(int16_t* left, int16_t* right)
+{
+  if (left)  *left  = pwm_out[0];
+  if (right) *right = pwm_out[1];
+}
+
+/* ★2026-09-26 配合开机开环测试：line_follow_control 不参与时告知遥测实际 PWM。
+   见头文件说明。 */
+void line_follow_report_pwm(int16_t left, int16_t right)
+{
+  pwm_out[0] = left;
+  pwm_out[1] = right;
+}
+
+#if USE_SPEED_LOOP
+/* ===========================================================================
+ * ★★★ 2026-09-26 【闭环测试】：只跑速度 PID，不跑循迹 PD ★★★
+ *
+ * 【为什么要它】实测已经证明：
+ *     开环 @60 PWM → 273 RPM、0.94 m/s、稳态波动只有 ±2%（硬件完全正常）
+ *     闭环循迹    → 一顿一顿往前窜 + 车头左右摆（典型极限环）
+ *   但"闭环"里有两个环（速度 PID + 循迹 PD）同时在工作，光看现象分不出是谁。
+ *   这个函数把循迹 PD 彻底拿掉，只留速度 PID，两轮同目标 ——
+ *     还抽  → 速度环自己的问题（积分/量化/增益）
+ *     不抽  → 是循迹 PD（或它与速度环的耦合）在抽
+ *
+ * 【两个参数是分开的】tgt_pwm 定目标转速，max_pwm 定输出上限。
+ *   故意不合成一个：这样才能"只改目标、不动输出余量"地扫工作点。
+ * ========================================================================== */
+#define TEST_SL_RAMPUP_MS  1500   /* 头 1.5 秒只测速不下发：让车先自然起转 */
+/* 测试期积分限幅（比正常的 50 小，防暴走） */
+#define TEST_SL_IMAX       10.0f
+
+void line_follow_test_speedloop(int16_t tgt_pwm, int16_t max_pwm)
+{
+  static uint16_t ramp_ms   = 0u;
+  static uint8_t  handover  = 0u;   /* 1 = 已交接（轨迹已清） */
+  int16_t ref = tgt_pwm;
+
+  if (ref >  99) ref =  99;
+  if (ref < -99) ref = -99;
+  if (max_pwm >  99) max_pwm =  99;
+  if (max_pwm <   0) max_pwm =   0;
+
+  if (ramp_ms < TEST_SL_RAMPUP_MS)
+  {
+    /* --- 起转期：不下发、只把控制器的历史清干净 --- */
+    ramp_ms = (uint16_t)(ramp_ms + CTRL_PERIOD_MS);
+    pid_reset(&spd_pid[0]);
+    pid_reset(&spd_pid[1]);
+    motor_set_differential(0, 0);
+    line_follow_report_pwm(0, 0);
+    return;
+  }
+
+  /* --- 刚交接：清一次轨迹缓冲 ---
+     为什么必须清：轨迹只有 600 拍，而起转期就占掉 150 拍；
+     更要紧的是我们要分析的是【PID 接管之后】的行为，
+     把起转期那段"PWM=0 车没动"混在里面只会干扰判读。 */
+  if (!handover)
+  {
+    handover = 1u;
+    telemetry_trace_reset();
+    telemetry_msg("CLOSEDLOOP PID take over");
+  }
+
+  /* --- 接管：目标换算成 RPM（与正常循迹同一套换算） --- */
+  float t = (float)((int32_t)ref * (int32_t)RPM_PER_PWM_X100) / 100.0f;
+  float dt = (float)CTRL_PERIOD_MS / 1000.0f;
+
+  spd_pid[0].bias = (float)ref;     /* 前馈：和正常循迹一致 */
+  spd_pid[1].bias = (float)ref;
+#if SPD_USE_FEEDFORWARD
+  spd_pid[0].i_max = TEST_SL_IMAX;  /* 测试期临时压小积分上限 */
+  spd_pid[1].i_max = TEST_SL_IMAX;
+#endif
+
+  int16_t m1 = (int16_t)pid_update(&spd_pid[0], t, (float)speed_get_rpm(MOTOR_LEFT),  dt);
+  int16_t m2 = (int16_t)pid_update(&spd_pid[1], t, (float)speed_get_rpm(MOTOR_RIGHT), dt);
+
+  /* 输出钳到 [0, max_pwm]：测试期不允许反转、不允许超过上限（防窜车） */
+  if (m1 > max_pwm) m1 = max_pwm;
+  if (m1 < 0)       m1 = 0;
+  if (m2 > max_pwm) m2 = max_pwm;
+  if (m2 < 0)       m2 = 0;
+
+  pwm_out[0] = m1;
+  pwm_out[1] = m2;
+  motor_set_differential(m1, m2);
+}
+/* ===========================================================================
+ * ★★★ 2026-09-26 【左右不对称专项测试】★★★
+ *
+ * 【为什么要它】实车完整循迹数据显示两轮严重不对称：
+ *     左轮 RPM1 均值 117 / 中位 113 / **16% 的样本低于 50**
+ *     右轮 RPM2 均值 155 / 中位 134 / 只有 4% 低于 50
+ *     两轮平均差 114 RPM，41% 的样本差 >100 RPM
+ *     17% 的拍子出现"一轮塌到 <50、另一轮 >100" ← 这就是"抽"的形态
+ *   而【合成里程 OD】掩盖了单轮信息，无法区分：
+ *     ① 左轮机械偏弱（真的转得慢）        → 修硬件
+ *     ② 转向时内侧轮本来就该慢（正常差速）→ 属正常，别乱改控制
+ *   本测试【两轮同 PWM 直行】，清里程后只比各自走了多少 mm —— 判据干净。
+ *
+ * 【判据】
+ *   |L-R|/max(L,R) > 10%  → 真·左右不对称，硬件问题（联轴器/齿轮箱/电机/驱动通道）
+ *   |L-R|/max(L,R) <  5%  → 轮子没问题，弯道不对称来自控制环/差速分配
+ *
+ * 【流程】上电 → 静置 TEST_ASYM_MS（不动，用于观察）→ 跑 TEST_ASYM_MS → 停车 + 打印。
+ * ========================================================================== */
+void line_follow_test_asym(int16_t pwm)
+{
+  static uint16_t t_left   = 0u;
+  static uint16_t t_run    = 0u;
+  static uint8_t  started  = 0u;
+  static uint8_t  reported = 0u;
+
+  if (pwm >  99) pwm =  99;
+  if (pwm <   0) pwm =   0;
+
+  /* --- 先静置：让用户有时间摆车、看清横幅 --- */
+  if (!started)
+  {
+    motor_set_differential(0, 0);
+    line_follow_report_pwm(0, 0);
+    t_left = (uint16_t)(t_left + CTRL_PERIOD_MS);
+    /* ★2026-09-26 修 bug：原来这里用 TEST_ASYM_MS（=总时长 3 秒）当静置时长，
+       而测试态窗口 TEST_OL_MS 也只有 3 秒 → 3 秒全被静置吃光，
+       车刚要走就被 app.c 强制停车（用户实测："小车没动"）。
+       现在静置用独立的短时长 TEST_ASYM_WAIT_MS（1 秒）。 */
+    if (t_left < TEST_ASYM_WAIT_MS) return;
+
+    odom_reset();                 /* ★清零：之后 L/R 就是本测试的净位移 */
+    started = 1u;
+    telemetry_msg("ASYM TEST start (same PWM both wheels)");
+    return;                       /* 这一拍不下发，保证 odom 从 0 开始 */
+  }
+
+  /* --- 同 PWM 直行 --- */
+  if (t_run < TEST_ASYM_RUN_MS)
+  {
+    t_run = (uint16_t)(t_run + CTRL_PERIOD_MS);
+    motor_set_differential(pwm, pwm);
+    line_follow_report_pwm(pwm, pwm);
+    return;
+  }
+
+  /* --- 结束：停车 + 只打 3 行结果 --- */
+  motor_set_differential(0, 0);
+  line_follow_report_pwm(0, 0);
+
+  if (!reported)
+  {
+    int32_t L = odom_left_mm();
+    int32_t R = odom_right_mm();
+    char b[128];
+    int  n;
+    reported = 1u;
+
+    telemetry_msg("===== ASYM RESULT =====");
+    n = snprintf(b, sizeof(b), "PWM=%d both wheels, run=%dms\r\n",
+                 (int)pwm, (int)TEST_ASYM_RUN_MS);
+    if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+    n = snprintf(b, sizeof(b), "L=%ldmm  R=%ldmm\r\n", (long)L, (long)R);
+    if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+    /* 差异百分比：以较大者为基准（避免除零） */
+    {
+      int32_t big = (L > R) ? L : R;
+      int32_t dif = (L > R) ? (L - R) : (R - L);
+      long    pct = (big > 0) ? (long)((dif * 100) / big) : 0L;
+      n = snprintf(b, sizeof(b), "DIFF=%ldmm (%ld%%)  %s\r\n",
+                   (long)dif, (long)pct,
+                   (pct > 10) ? "-> REAL ASYMMETRY (hardware)"
+                              : "-> OK (within 10%)");
+      if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+    }
+    telemetry_msg("=======================");
+  }
+}
+
+/* ===========================================================================
+ * ★★★ 2026-09-26 【手的判别测试】：机械 vs 编码器计数 ★★★
+ *
+ * 【背景】实测 45 PWM 直行 3 秒：左轮 1854mm / 右轮 2095mm，差 11.5%（稳定偏差，
+ *   两轮都在持续前进、没有卡死）。但"里程偏少"有两个完全不同的来源：
+ *     ① 左轮真的转得少（机械阻力 / 齿轮箱效率）→ 修硬件
+ *     ② 左轮编码器【每圈计数】比右轮少 11.5%（尺子不准）→ 两轮一样快，只需标定
+ *
+ * 【区分原理】用手把两个轮子【各慢慢转整整一圈】：物理位移都是一圈（完全相同）。
+ *   此时若里程仍差 11.5%，差异只能来自编码器计数 → 可能是 ②。
+ *   若里程一致 → 编码器没问题，11.5% 是机械 → ①。
+ *
+ * 【为什么做成开机自动】本车 PC→车 RX 不通，发不了 `O` 指令读里程，
+ *   所以只能自动分段 + 靠蜂鸣器提示，全程不动电机（可架空/拿在手上）。
+ * ========================================================================== */
+#define HANDSEG_MS   3000   /* 每段 3 秒 */
+
+void line_follow_test_handturn(void)
+{
+  /* 0=静置等待, 1=基准段, 2=提示转左轮, 3=测左轮, 4=提示转右轮, 5=测右轮, 6=出结果 */
+  static uint8_t  phase = 0u;
+  static uint16_t t     = 0u;
+  static int32_t  dL    = 0;
+  static int32_t  dR    = 0;
+  static uint8_t  done  = 0u;
+
+  /* 全程不动电机：只测速 */
+  motor_set_differential(0, 0);
+
+  t = (uint16_t)(t + CTRL_PERIOD_MS);
+  if (t < HANDSEG_MS) return;
+  t = 0u;
+
+  switch (phase)
+  {
+  case 0u:  /* 静置等待：让用户把车拿在手上/架空 */
+    odom_reset();
+    telemetry_msg("HANDTEST: hold car, wheels free. Get ready...");
+    phase = 1u;
+    break;
+
+  case 1u:  /* 基准段：车不动，确认没有漂移 */
+    odom_reset();
+    telemetry_msg("HANDTEST: baseline (do NOT touch wheels) 3s");
+    phase = 2u;
+    break;
+
+  case 2u:  /* 开始测左轮，记录起点 */
+    dL = odom_left_mm();
+    telemetry_msg("HANDTEST: >>> turn LEFT wheel EXACTLY 1 turn <<<");
+    phase = 3u;
+    break;
+
+  case 3u:  /* 左轮结束 */
+    dL = odom_left_mm() - dL;
+    dR = odom_right_mm();
+    telemetry_msg("HANDTEST: >>> now turn RIGHT wheel EXACTLY 1 turn <<<");
+    phase = 4u;
+    break;
+
+  case 4u:  /* 右轮结束，出结果 */
+    dR = odom_right_mm() - dR;
+    phase = 5u;
+    break;
+
+  default:
+    break;
+  }
+
+  if (phase == 5u && !done)
+  {
+    char b[128];
+    int  n;
+    done = 1u;
+    {
+      int32_t aL = (dL < 0) ? -dL : dL;   /* odom 前进为负，取绝对值比较 */
+      int32_t aR = (dR < 0) ? -dR : dR;
+      int32_t big = (aL > aR) ? aL : aR;
+      int32_t dif = (aL > aR) ? (aL - aR) : (aR - aL);
+      long    pct = (big > 0) ? (long)((dif * 100) / big) : 0L;
+
+      telemetry_msg("===== HANDTEST RESULT =====");
+      n = snprintf(b, sizeof(b), "LEFT  turn: %ld mm\r\n", (long)aL);
+      if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+      n = snprintf(b, sizeof(b), "RIGHT turn: %ld mm\r\n", (long)aR);
+      if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+      n = snprintf(b, sizeof(b), "one turn should be ~207mm (422cnt x 0.491)\r\n");
+      if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+      n = snprintf(b, sizeof(b), "DIFF=%ld%%  %s\r\n", (long)pct,
+                   (pct > 5) ? "-> ENCODER count differs (calibrate)"
+                             : "-> encoders MATCH (asym is MECHANICAL)");
+      if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+      telemetry_msg("===========================");
+    }
+  }
+}
+
+#endif /* USE_SPEED_LOOP */
+
+/* ===========================================================================
+ * ★★★ 2026-09-26 【闭环直行 + 左右不对称】：验证 WHEEL_GAIN 补偿 ★★★
+ *
+ * 【为什么另开一个】模式 3（line_follow_test_asym）是【开环】直给 PWM，
+ *   走不到 WHEEL_GAIN 所在的速度环代码路径 → 用它验证补偿是无效的。
+ *   补偿在速度环内部，必须用【闭环】验证。
+ *
+ * 【它做什么】两轮同一目标转速、直行（不循迹），清里程后比两轮各走多少 mm。
+ *   与模式 3 的唯一区别是：这里经过速度 PID + WHEEL_GAIN 补偿。
+ *
+ * 【判据】补偿前的开环基准：45PWM 下 左1854 / 右2095 mm（差 11.5%）。
+ *   WHEEL_GAIN_L=1.11 生效后，两轮里程差应明显缩小（目标 <5%）。
+ * ========================================================================== */
+void line_follow_test_asym_cl(int16_t pwm, int16_t max_pwm)
+{
+  static uint16_t t_wait = 0u;
+  static uint16_t t_run  = 0u;
+  static uint8_t  started = 0u;
+  static uint8_t  reported = 0u;
+  int16_t ref = pwm;
+
+  if (ref >  99) ref =  99;
+  if (ref < -99) ref = -99;
+  if (max_pwm >  99) max_pwm =  99;
+  if (max_pwm <   0) max_pwm =   0;
+
+  motor_set_differential(0, 0);   /* 先确保不动（下面按需覆盖） */
+
+  if (!started)
+  {
+    t_wait = (uint16_t)(t_wait + CTRL_PERIOD_MS);
+    if (t_wait < TEST_ASYM_WAIT_MS) return;
+    odom_reset();
+    started = 1u;
+    telemetry_msg("ASYM(CL) start: closed-loop straight");
+    return;
+  }
+
+  if (t_run < TEST_ASYM_RUN_MS)
+  {
+    float t  = (float)((int32_t)ref * (int32_t)RPM_PER_PWM_X100) / 100.0f;
+    float dt = (float)CTRL_PERIOD_MS / 1000.0f;
+    float o1, o2;
+    int16_t m1, m2;
+
+    t_run = (uint16_t)(t_run + CTRL_PERIOD_MS);
+
+    /* 与正常循迹完全相同的路径：前馈(带增益) + PID + 输出增益 */
+    spd_pid[0].bias = (float)ref * WHEEL_GAIN_L;
+    spd_pid[1].bias = (float)ref * WHEEL_GAIN_R;
+    o1 = pid_update(&spd_pid[0], t, (float)speed_get_rpm(MOTOR_LEFT),  dt);
+    o2 = pid_update(&spd_pid[1], t, (float)speed_get_rpm(MOTOR_RIGHT), dt);
+    m1 = (int16_t)(o1 * WHEEL_GAIN_L);
+    m2 = (int16_t)(o2 * WHEEL_GAIN_R);
+    if (m1 > max_pwm) m1 = max_pwm; if (m1 < 0) m1 = 0;
+    if (m2 > max_pwm) m2 = max_pwm; if (m2 < 0) m2 = 0;
+
+    pwm_out[0] = m1; pwm_out[1] = m2;
+    motor_set_differential(m1, m2);
+    return;
+  }
+
+  motor_set_differential(0, 0);
+  line_follow_report_pwm(0, 0);
+
+  if (!reported)
+  {
+    int32_t L = odom_left_mm();
+    int32_t R = odom_right_mm();
+    int32_t aL = (L < 0) ? -L : L;
+    int32_t aR = (R < 0) ? -R : R;
+    int32_t big = (aL > aR) ? aL : aR;
+    int32_t dif = (aL > aR) ? (aL - aR) : (aR - aL);
+    long    pct = (big > 0) ? (long)((dif * 100) / big) : 0L;
+    char b[128];
+    int  n;
+    reported = 1u;
+
+    telemetry_msg("===== ASYM(CL) RESULT =====");
+    n = snprintf(b, sizeof(b), "gainL=%d.%02d gainR=%d.%02d ref=%d\r\n",
+                 (int)WHEEL_GAIN_L, (int)((WHEEL_GAIN_L - (int)WHEEL_GAIN_L) * 100),
+                 (int)WHEEL_GAIN_R, (int)((WHEEL_GAIN_R - (int)WHEEL_GAIN_R) * 100),
+                 (int)ref);
+    if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+    n = snprintf(b, sizeof(b), "L=%ldmm  R=%ldmm\r\n", (long)aL, (long)aR);
+    if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+    n = snprintf(b, sizeof(b), "DIFF=%ld%%  (baseline without gain was 11.5%%)\r\n", (long)pct);
+    if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+    telemetry_msg("============================");
+  }
+}
+
+/* ===========================================================================
+ * ★★★ 2026-09-26 【诊断摘要】：板子上自己算，只打印 4 行 ★★★
+ *
+ * 【为什么要它】原方案靠"轨迹回放"取数据，但：
+ *   ① 回放 150+ 行，本车串口在丢字符，用户根本抄不全（试了两轮都失败）；
+ *   ② 人眼从 150 行里判断"PWM 稳不稳"本身就不靠谱。
+ * 改成板子自己统计，只打 4 行 × ~50 字符 —— 丢几个字符也能读，而且结论直接给出。
+ *
+ * 【统计什么、怎么判】
+ *   PWM 列：min/max/均值。若 min≈0 且 max≈上限 → 控制器在【大幅摆动】= 极限环。
+ *           若 min/max 都很窄         → 控制器输出平稳，抖动另有来源。
+ *   转速列：目标 vs 实测 min/max/均值。看"平均值对不对"和"瞬时摆多大"。
+ *   饱和计数：PWM 顶到 0 或上限的拍数。占比高 = 输出被打满，控制已经失效。
+ *   里程：开环 vs 闭环在同一目标下的平均车速对照。
+ *
+ * ★不占大内存：不需要存整段轨迹，只维护累加器和 min/max（O(1) 空间）。
+ * ========================================================================== */
+#define TEST_STAT_NSLOT   64    /* 保留最近 64 拍的明细（够看清一个振荡周期） */
+
+static struct {
+  uint8_t  run;                 /* 1 = 正在统计 */
+  uint16_t n;                   /* 已统计拍数 */
+  int16_t  pw_min[2], pw_max[2];
+  int32_t  pw_sum[2];
+  int16_t  rp_min[2], rp_max[2];
+  int32_t  rp_sum[2];
+  uint16_t sat_lo, sat_hi;      /* PWM 顶到下限/上限的拍数 */
+  int16_t  tgt_rpm;             /* 目标转速（用于对照） */
+  /* 滑动明细：诊断波形用 */
+  int16_t  hist_pw[TEST_STAT_NSLOT];
+  int16_t  hist_rp[TEST_STAT_NSLOT];
+  uint8_t  hist_i;
+} ts;
+
+void line_follow_test_stats_tick(int16_t tgt_pwm)
+{
+  /* 起转期（PWM=0、车没动）不统计 —— 否则 min/max 全被那段污染 */
+  if (pwm_out[0] == 0 && pwm_out[1] == 0) return;
+
+  if (!ts.run)
+  {
+    ts.run = 1;
+    ts.n = 0; ts.sat_lo = 0; ts.sat_hi = 0; ts.hist_i = 0;
+    ts.tgt_rpm = (int16_t)((int32_t)tgt_pwm * (int32_t)RPM_PER_PWM_X100 / 100);
+    for (int v = 0; v < 2; v++)
+    {
+      ts.pw_min[v] = 32000; ts.pw_max[v] = -32000; ts.pw_sum[v] = 0;
+      ts.rp_min[v] = 32000; ts.rp_max[v] = -32000; ts.rp_sum[v] = 0;
+    }
+  }
+
+  for (int v = 0; v < 2; v++)
+  {
+    int16_t p = pwm_out[v];
+    int16_t r = speed_get_rpm(v == 0 ? MOTOR_LEFT : MOTOR_RIGHT);
+    if (p < ts.pw_min[v]) ts.pw_min[v] = p;
+    if (p > ts.pw_max[v]) ts.pw_max[v] = p;
+    ts.pw_sum[v] += p;
+    if (r < ts.rp_min[v]) ts.rp_min[v] = r;
+    if (r > ts.rp_max[v]) ts.rp_max[v] = r;
+    ts.rp_sum[v] += r;
+  }
+  if (pwm_out[0] <= 0 || pwm_out[1] <= 0) ts.sat_lo++;
+  if (pwm_out[0] >= TEST_SL_MAX_PWM || pwm_out[1] >= TEST_SL_MAX_PWM) ts.sat_hi++;
+
+  ts.hist_pw[ts.hist_i] = pwm_out[0];
+  ts.hist_rp[ts.hist_i] = speed_get_rpm(MOTOR_LEFT);
+  ts.hist_i = (uint8_t)((ts.hist_i + 1u) % TEST_STAT_NSLOT);
+  ts.n++;
+}
+
+void line_follow_test_stats_dump(void)
+{
+  if (!ts.run || ts.n == 0) { telemetry_msg("STATS: no data"); return; }
+
+  char b[160];
+  int  n;
+
+  telemetry_msg("===== TEST STATS (on-board) =====");
+  /* 行1：目标与 PWM 输出范围 —— 判断"控制器是否在大幅摆动" */
+  n = snprintf(b, sizeof(b), "TGT=%dRPM  PWMmin=%d/%d  PWMmax=%d/%d  cap=%d\r\n",
+               (int)ts.tgt_rpm,
+               (int)ts.pw_min[0], (int)ts.pw_min[1],
+               (int)ts.pw_max[0], (int)ts.pw_max[1], (int)TEST_SL_MAX_PWM);
+  if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+
+  /* 行2：PWM 均值 —— "控制器平均给了多少"（对照开环达到同转速所需的值） */
+  n = snprintf(b, sizeof(b), "PWMavg=%d/%d  n=%u\r\n",
+               (int)(ts.pw_sum[0] / (int32_t)ts.n), (int)(ts.pw_sum[1] / (int32_t)ts.n),
+               (unsigned)ts.n);
+  if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+
+  /* 行3-4：转速范围与均值 —— "平均对不对" + "瞬时摆多大" */
+  n = snprintf(b, sizeof(b), "RPM1 min=%d max=%d avg=%d\r\n",
+               (int)ts.rp_min[0], (int)ts.rp_max[0], (int)(ts.rp_sum[0] / (int32_t)ts.n));
+  if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+  n = snprintf(b, sizeof(b), "RPM2 min=%d max=%d avg=%d\r\n",
+               (int)ts.rp_min[1], (int)ts.rp_max[1], (int)(ts.rp_sum[1] / (int32_t)ts.n));
+  if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+
+  /* 行5：饱和计数 —— 输出被打满的拍数占比（打满 = 控制已失效） */
+  n = snprintf(b, sizeof(b), "SAT lo=%u hi=%u of %u\r\n",
+               (unsigned)ts.sat_lo, (unsigned)ts.sat_hi, (unsigned)ts.n);
+  if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+
+  /* 行6：PWM 波形明细（最近 32 拍）—— 振荡周期直接看这一行 */
+  n = snprintf(b, sizeof(b), "WAVE PWM:");
+  {
+    uint8_t cnt   = (ts.n < TEST_STAT_NSLOT) ? (uint8_t)ts.n : (uint8_t)TEST_STAT_NSLOT;
+    if (cnt > 32u) cnt = 32u;
+    uint8_t start = (uint8_t)((ts.hist_i + TEST_STAT_NSLOT - cnt) % TEST_STAT_NSLOT);
+    for (uint8_t k = 0u; k < cnt && n < 140; k++)
+      n += snprintf(b + n, sizeof(b) - (size_t)n, " %d",
+                    (int)ts.hist_pw[(start + k) % TEST_STAT_NSLOT]);
+  }
+  n += snprintf(b + n, sizeof(b) - (size_t)n, "\r\n");
+  HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 200);
+
+  telemetry_msg("=================================");
+  ts.run = 0;
 }
 
 uint8_t line_follow_is_lost(void)

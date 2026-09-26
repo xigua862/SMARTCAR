@@ -149,6 +149,22 @@ void MX_TIM3_Init(void)
 
   /* USER CODE BEGIN TIM3_Init 1 */
 
+  /* ★★★ 2026-09-26 【修根因】打开编码器输入数字滤波 ★★★
+     原来 IC1Filter/IC2Filter 在 CubeMX 里是 0 = 【完全不滤波】。
+     后果（实测证据）：电机 PWM 噪声窜进编码器 A/B 相 → 假计数 → d 出现
+       -12691 这类跳变 → rpm 冲到 -30000（被 speed.c 钳位）→ 速度 PID 拿到
+       垃圾反馈 → 输出在 0↔60 之间 bang-bang → 小车"一顿一顿往前窜"。
+     铁证：同一趟里 OD 逐拍增量稳定在 5~6mm、负增量 0 次（车实际走得很顺），
+       但 RPM 读数却报 -30000 —— 说明是【计数被噪声污染】，不是车真的抖。
+     也解释了为什么"开环平顺、闭环才抽"：开环时 PWM 恒定不调制，噪声不起作用。
+     ★滤波值 0x0F = 在 f_DTS/32 采样率下连续 8 次一致才认账，
+       可滤掉 <~4.3µs 的毛刺；而编码器最高频率约 6.5kHz(465RPM×14沿)，
+       每个脉冲 154µs —— 绝不会误滤真实脉冲。
+     ★放在 USER CODE 段：CubeMX 重新生成时不会覆盖
+       （本项目有"CubeMX 重新生成破坏工程"的前车之鉴，务必保持在这里）。 */
+  sConfig.IC1Filter = 0x0F;
+  sConfig.IC2Filter = 0x0F;
+
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
   htim3.Init.Prescaler = 0;
@@ -192,6 +208,12 @@ void MX_TIM4_Init(void)
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
   /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* ★★★ 2026-09-26 同 TIM3：打开编码器输入数字滤波（右轮）★★★
+     理由与取值见 MX_TIM3_Init 里那段长注释 —— 两轮必须一致，
+     否则会出现"一侧信噪比好、一侧差"的假性左右不对称。 */
+  sConfig.IC1Filter = 0x0F;
+  sConfig.IC2Filter = 0x0F;
 
   /* USER CODE END TIM4_Init 1 */
   htim4.Instance = TIM4;

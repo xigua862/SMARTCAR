@@ -71,8 +71,14 @@ void telemetry_banner(void)
    为什么要它：跑车时 USB 线会拖，而"过直角弯/出口那几秒"正是最需要看的数据。
    用法：跑完停下 → 串口发 `Q` → 按时间顺序回放 600 拍（6 秒 @100Hz）。
    ⚠️ 回放是阻塞发送（600 行 ≈ 1.6 秒），所以请【停下来再发】。 */
+/* ★2026-09-26 加 oL/oR（左右轮各自里程）：
+   排查"弯道还抽"时发现两轮严重不对称（左轮均值 117、右轮 155 RPM，41% 的样本差 >100），
+   但原来的合成里程 OD 看不出单轮 —— 无法区分
+     ① 左轮机械偏弱（真的转得慢）
+     ② 转向时内侧轮本来就该慢（正常差速）
+   加了单轮里程就能一刀切开。 */
 #define TRACE_N 600
-typedef struct { uint16_t od; int16_t gz; uint8_t ir; } trace_t;
+typedef struct { uint16_t od; uint16_t oL; uint16_t oR; int16_t gz; int16_t pwl; int16_t pwr; uint8_t ir; } trace_t;
 static trace_t  s_tr[TRACE_N];
 static uint16_t s_tr_i = 0u;   /* 写指针 */
 static uint16_t s_tr_n = 0u;   /* 已写条数 */
@@ -83,6 +89,17 @@ void telemetry_trace_tick(void)
   s_tr[s_tr_i].od = (uint16_t)odom_distance_mm();
   s_tr[s_tr_i].gz = (int16_t)imu_get_gyro_z();
   s_tr[s_tr_i].ir = (uint8_t)(r.raw & 0xFFu);
+  /* ★2026-09-26 【关键补充】把"控制器实际输出的 PWM"也记进轨迹。
+     为什么必须加：诊断"一顿一顿往前窜"时，光有位移看不出是
+       ① 控制器在乱输出（PWM 大幅摆动） 还是
+       ② 控制器输出平稳但机械/电机在抖
+     而本车【PC→车 RX 不通】（见 telemetry_report 的注释），发不了 `H` 去取长行，
+     默认短行又太挤塞不下 PWM —— 轨迹是唯一还能用的观测通道，
+     所以把 PWM 记在这里。600 拍 = 6 秒，足够看清振荡周期。 */
+  line_follow_last_pwm(&s_tr[s_tr_i].pwl, &s_tr[s_tr_i].pwr);
+  /* ★2026-09-26 单轮里程：区分"左轮机械偏弱"vs"转向正常差速" */
+  s_tr[s_tr_i].oL = (uint16_t)odom_left_mm();
+  s_tr[s_tr_i].oR = (uint16_t)odom_right_mm();
   s_tr_i = (uint16_t)((s_tr_i + 1u) % (uint16_t)TRACE_N);
   if (s_tr_n < (uint16_t)TRACE_N) s_tr_n++;
 }
@@ -104,8 +121,10 @@ void telemetry_trace_dump(void)
     for (uint8_t j = 0u; j < LINE_CHANNELS; j++)
       ir[j] = (s_tr[i].ir >> j) & 1u ? '1' : '0';
     ir[LINE_CHANNELS] = '\0';
-    int n = snprintf(b, sizeof(b), "T%03u IR:%s GZ=%5d OD=%u\r\n",
-                     (unsigned)k, ir, (int)s_tr[i].gz, (unsigned)s_tr[i].od);
+    int n = snprintf(b, sizeof(b), "T%03u PWM=%3d/%3d L=%4u R=%4u IR:%s GZ=%5d OD=%u\r\n",
+                     (unsigned)k, (int)s_tr[i].pwl, (int)s_tr[i].pwr,
+                     (unsigned)s_tr[i].oL, (unsigned)s_tr[i].oR,
+                     ir, (int)s_tr[i].gz, (unsigned)s_tr[i].od);
     if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)b, (uint16_t)n, 100);
     i = (uint16_t)((i + 1u) % (uint16_t)TRACE_N);
   }
@@ -173,11 +192,20 @@ void telemetry_print_full(void)
     mx[i] = (k1_maxraw >> i) & 1u ? '1' : '0';
   mx[LINE_CHANNELS] = '\0';
 
+  /* ★2026-09-26 诊断：控制器【实际输出】的 PWM（左右轮）。
+     排查"一抽一抽"时，只有 RPM 无法区分"电机不响应"和"控制器没出力"；
+     有了 PWM= 就能直接分岔（判据见 line_follow_last_pwm 的说明）。
+     ⚠️ 本次用 PWM= 顶掉了原来的 K1=missed/total（1kHz 漏采统计）——
+        直线抖动诊断用不到它；要查相切点/出口识别时再换回来。 */
+  int16_t pwm_l = 0, pwm_r = 0;
+  line_follow_last_pwm(&pwm_l, &pwm_r);
+
   char buf[288];
   int n = snprintf(buf, sizeof(buf),
-    "FW:%s IR:%s RPM1=%d RPM2=%d KP=%d.%d SP=%d ST=%d DT=%d OD=%ld PATH=%ld ODE=%ld OS=%d GZ=%d GW=%d SB=%d G7=%d GX=%d GR=%d CX=%d BR=%d GE=%d GD=%d IG=%d EH=%d K1=%d/%d MX=%d/%s\r\n",
+    "FW:%s IR:%s RPM1=%d RPM2=%d PWM=%d/%d KP=%d.%d SP=%d ST=%d DT=%d OD=%ld PATH=%ld ODE=%ld OS=%d GZ=%d GW=%d SB=%d G7=%d GX=%d GR=%d CX=%d BR=%d GE=%d GD=%d IG=%d EH=%d MX=%d/%s\r\n",
     FW_TAG, ir,
     speed_get_rpm(MOTOR_LEFT), speed_get_rpm(MOTOR_RIGHT),
+    (int)pwm_l, (int)pwm_r,          /* ★实际下发的 PWM：和 RPM 对照就知道是谁的问题 */
     kp_x10 / 10, kp_x10 % 10,
     sp_straight, (int)car_fsm_state(),
     (int)loop_dt_ms,                  /* 实测控制周期(ms) */
@@ -205,10 +233,10 @@ void telemetry_print_full(void)
     (int)line_follow_in_gourd(),            /* ★IG: 1=当前在葫芦圈里（此时丢线兜底被屏蔽） */
     (int)line_follow_edge_hold_cnt(),       /* ★EH: 最边两路"掉路容忍"补过几次（累计）
                                                 涨得多 = 相切处最边传感器熄灭确实在发生 */
-    (int)k1_missed, (int)k1_total,          /* ★K1=missed/total：1kHz 采样里"与主循环读数
-                                                不同"的次数 / 总次数 = 100Hz 漏掉的瞬间占比。
-                                                占比高 = 图案变化比 100Hz 采样还快 —— 出口那种
-                                                "一闪而过"就是被这里量出来的 */
+    /* ★2026-09-26：原来的 K1=missed/total（1kHz 漏采统计）已从格式串移除，
+       位置换成了 PWM=l/r（本次诊断的核心观测量）。
+       下面两个变量仍要算（k1_maxact / mx 依赖同一次 line_follow_1k_stats 取值），
+       只是不再打印。要查相切点/出口识别时，把 K1= 换回格式串即可。 */
     (int)k1_maxact, mx);                    /* ★MX=路数/位图：本窗口出现过的最宽图案。
                                                 若某次 MX 显示"6/00111111"而同一行的 IR: 从没
                                                 出现过它 → 说明 100Hz 确实漏掉了一个宽图案 */
