@@ -923,7 +923,13 @@ void line_follow_control(int16_t base)
   }
   else
   {
-    ge_frames = 0u;
+    /* ★★★ 2026-09-26 修：原来是 ge_frames = 0【直接清零】，会让减速整个失效 ★★★
+       实车证据：整趟日志里 `GOURD-ENTRY mark set` / `mark cleared` 交替出现很多次
+       （IG 在 0/1 之间一秒内反复跳）。原来只要拍到一次 IG=0 就把累计拍数清零
+       → ge_frames 永远到不了 GOURD_SLOW_AFTER → **减速判据实际从不触发**。
+       改成【衰减】：IG 短暂丢失只减 1 拍（约等于把"净在圈内时间"打折），
+       几十拍的抖动不会抹掉累计进度；真的出圈后自然衰减到 0。 */
+    if (ge_frames > 0u) ge_frames--;
   }
 #endif
 
