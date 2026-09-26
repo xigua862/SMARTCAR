@@ -1,5 +1,6 @@
 #include "odom.h"
 #include "app_config.h"
+#include "drivers/pose.h"    /* ★CARD-005(nav-replay 分支)：里程清零时位姿同步清零 */
 
 #if USE_ENCODER
 #include "drivers/encoder.h"
@@ -42,6 +43,7 @@ void odom_init(void)
 void odom_reset(void)
 {
   odom_init();
+  pose_reset();   /* ★CARD-005：Z 清零 = 新一次画图的起点（上拍值同步重采） */
 }
 
 void odom_update(void)

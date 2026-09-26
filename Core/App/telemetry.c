@@ -7,6 +7,7 @@
 #include "drivers/speed.h"
 #include "drivers/encoder.h"
 #include "drivers/odom.h"        /* ★里程计: 遥测 OD= / PATH= */
+#include "drivers/pose.h"         /* ★CARD-005(nav-replay 分支): P 位姿行 */
 #include "drivers/key.h"
 #include "drivers/buzzer.h"
 #include "drivers/led.h"
@@ -110,6 +111,16 @@ void telemetry_trace_dump(void)
     i = (uint16_t)((i + 1u) % (uint16_t)TRACE_N);
   }
   telemetry_msg("--- TRACE end ---");
+}
+
+/* ★2026-09-26 CARD-005（nav-replay 分支）：位姿行 10Hz，推车画图用。
+   格式钉死（PC 脚本 pose_plot.py 按它解析）：P x=<int> y=<int> yaw=<%+.1f> */
+void telemetry_pose_report(void)
+{
+  char m[64];
+  (void)snprintf(m, sizeof(m), "P x=%d y=%d yaw=%+.1f",
+                 (int)pose_get_x_mm(), (int)pose_get_y_mm(), (double)pose_get_yaw_deg());
+  telemetry_msg(m);
 }
 
 /* ★2026-09-24：默认遥测改成【短核心行】（≈67 字符 → 80 列终端不再折行）。

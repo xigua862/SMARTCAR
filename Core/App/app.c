@@ -3,6 +3,7 @@
 #include "drivers/line_sensor.h"
 #include "drivers/speed.h"
 #include "drivers/odom.h"        /* ★里程计: 量"跑了多少距离" */
+#include "drivers/pose.h"         /* ★CARD-005(nav-replay 分支): 位姿推算（推车画图） */
 #include "drivers/imu.h"          /* USE_IMU 开关 */
 #include "drivers/led.h"
 #include "drivers/buzzer.h"
@@ -29,6 +30,7 @@ uint16_t loop_dt_ms = 0;
 static uint32_t t_ctl = 0;
 static uint32_t t_tel = 0;
 static uint32_t t_ui  = 0;
+static uint32_t t_pose = 0;   /* ★CARD-005：P 行 10Hz 节流 */
 
 /* 顶层初始化: 每个外设/模块按需初始化（顺序：硬件输出 → 传感器 → 人机 → 状态机 → 遥测） */
 void app_init(void)
@@ -61,6 +63,7 @@ void app_loop(void)
     buzzer_update();
     imu_update();            /* 读陀螺 Z 偏航率(给循迹用) */
     odom_update();           /* ★里程累加(与 UI 同节拍 = 10ms, 60ms 内就能发现 16 位回绕) */
+    pose_step();             /* ★CARD-005：位姿推算（与 odom_update 同一处，推车时不发车也在跑） */
   }
 
   /* ★测试态（他要求）：`TEST <秒>` → 只循迹 n 秒 → 自动停车 + 回放这 n 秒的 100Hz 轨迹。
@@ -116,6 +119,13 @@ void app_loop(void)
       t_tel = now;
       telemetry_report();
     }
+  }
+
+  /* ★CARD-005：位姿遥测 P 行 10Hz（100ms 一拍，推车画图用；别碰现有短行格式） */
+  if (now - t_pose >= 100u)
+  {
+    t_pose = now;
+    telemetry_pose_report();
   }
 
   /* 串口命令立即处理(不受控制周期绑定) */

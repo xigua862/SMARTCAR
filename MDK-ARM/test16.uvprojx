@@ -536,6 +536,11 @@
               <FilePath>../Core/App/drivers/odom.c</FilePath>
             </File>
             <File>
+              <FileName>pose.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/drivers/pose.c</FilePath>
+            </File>
+            <File>
               <FileName>imu.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/App/drivers/imu.c</FilePath>
