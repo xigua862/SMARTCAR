@@ -281,10 +281,29 @@ void imu_read_angles(float* pitch_out, float* roll_out)
   float pitch_acc = atan2f(-ax_f, sqrtf(ay_f * ay_f + az_f * az_f)) * RAD_TO_DEG;
   float roll_acc  = atan2f(ay_f, sqrtf(ax_f * ax_f + az_f * az_f)) * RAD_TO_DEG;
 
-  /* 互补滤波: 角度 = 0.98*(角度+陀螺角速度*dt) + 0.02*角度(加速度计)  (调用周期约10ms) */
-  float dt = 0.010f;
-  pitch = 0.98f * (pitch + gyp * dt) + 0.02f * pitch_acc;
-  roll  = 0.98f * (roll  + gxp * dt) + 0.02f * roll_acc;
+  /* 互补滤波: 角度 = 0.98*(角度+陀螺角速度*dt) + 0.02*角度(加速度计)
+     ★★★ 2026-09-26 修：原来 dt 是【硬编码 0.010f】，那是错的 ★★★
+     和 yaw 积分（本文件 imu_update 里）当年犯的是【同一个毛病】：
+       真实调用间隔并不等于 10ms —— 主循环会因【遥测串口发送(约21ms/次)】和
+       IMU 的 I2C 读而抖动，实测 10、11、13、21ms 不等。
+       真实间隔 21ms 时按 10ms 积分 → 陀螺贡献【少算一半】
+       → 快速运动时姿态会被加速度计拽偏（等效互补系数从 0.98 变成 ~0.99 还偏）。
+     yaw 那边早已改用实测 dt（见 imu_update 的注释），pitch/roll 这里漏改了，
+     现在补齐：用本函数自己的时间戳算 dt，并夹在 [1, 50]ms 防异常/回绕。
+     ★接口不变（仍无参），时间戳是文件内静态量 —— 不牵动调用方。 */
+  {
+    static uint32_t ang_last_tick = 0u;
+    uint32_t now_t = HAL_GetTick();
+    float dt;
+    if (ang_last_tick == 0u) dt = (float)UI_PERIOD_MS / 1000.0f;   /* 首次无参考 */
+    else                     dt = (float)(now_t - ang_last_tick) / 1000.0f;
+    ang_last_tick = now_t;
+    if (dt <= 0.0f)  dt = (float)UI_PERIOD_MS / 1000.0f;
+    if (dt >  0.05f) dt = 0.05f;                                   /* 异常/回绕保护 */
+
+    pitch = 0.98f * (pitch + gyp * dt) + 0.02f * pitch_acc;
+    roll  = 0.98f * (roll  + gxp * dt) + 0.02f * roll_acc;
+  }
 
   *pitch_out = pitch;
   *roll_out  = roll;
