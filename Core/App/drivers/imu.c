@@ -98,11 +98,43 @@ float imu_get_gyro_z(void)
   return gz_dps;                 /* 度/秒，正 = 左转（右手系绕 Z） */
 }
 
+/* ============================================================================
+ * ★★★ 2026-09-26 【削顶计数器】—— 只观测，不改控制 ★★★
+ *
+ * 【为什么要它】实车日志（FW:0926-1800）里 `|GZ| >= 990` 出现 34/457 次（7.4%），
+ *   其中 `GZ=-995` 重复 25 次 —— 反复落在同一个数 = 削顶铁证
+ *   （真实测量不会反复等于同一个值）。而 995 ≈ 32767/32.8 正好是 ±1000dps 档满量程。
+ *
+ * 【为什么不能靠"换更宽的档位"解决】已试过并失败：
+ *   · 09-24 写 0x18(±2000dps) → **写不进去**，芯片留在 ±250 默认档 → GZ 读数大 8 倍
+ *   · 今天再写 0x18 → **GZ 恒为 0**（比写不进去更糟，已 revert）
+ *   0x10(±1000) 与 0x18(±2000) 只差 FS_SEL 一个 bit，前者稳定可用、后者直接坏
+ *   ⇒ **这颗芯片（大概率是国产 MPU6050 克隆）的 FS_SEL=3 位是坏的/未实现**，
+ *     不是配置错误 ⇒ 【改代码修不了】，±1000dps 已是它给的最宽档位。
+ *
+ * 【所以改为先量清楚】在动手之前必须知道：削顶到底是不是葫芦圈的瓶颈？
+ *   · 若只在"打滑自旋"时削顶，而正常穿越 S 形时不削 → 它不是瓶颈，别再折腾它
+ *   · 若穿越过程中持续削顶 → 偏航积分确实少算，才值得为它设计软件补偿
+ *   判据就是本计数器：遥测新增 `SAT=`（本拍是否削顶）与 `SATN=`（累计次数）。
+ * ========================================================================== */
+static uint32_t gz_sat_cnt   = 0u;   /* 累计削顶拍数 */
+static uint8_t  gz_sat_now   = 0u;   /* 本拍是否削顶 */
+
+uint8_t  imu_gz_saturated(void)     { return gz_sat_now; }
+uint32_t imu_gz_sat_count(void)     { return gz_sat_cnt; }
+void     imu_gz_sat_reset(void)     { gz_sat_cnt = 0u; }
+
 void imu_update(void)
 {
   imu_read_raw();
   gz_dps = (float)gz / gyro_lsb;
   if (calibrated) gz_dps -= gyro_bz;
+
+  /* ★削顶判定：看【原始读数】|gz| 是否贴近满量程，而不是看 dps ——
+     dps 会被 `- gyro_bz` 影响，原始值和量程是直接对应的。
+     满量程 raw = 32767；取 97% = 31784 作阈值（真实测量几乎不会刚好贴着上限）。 */
+  gz_sat_now = ((gz >= (int16_t)31784) || (gz <= (int16_t)-31784)) ? 1u : 0u;
+  if (gz_sat_now && (gz_sat_cnt < 0xFFFFFFFFu)) gz_sat_cnt++;
 
   /* ★航向角积分
      ⚠️2026-09-23 修：原来用【固定 dt = CTRL_PERIOD_MS(10ms)】，这是错的。
@@ -269,4 +301,7 @@ void    imu_read_angles(float* pitch, float* roll) { (void)pitch; (void)roll; }
 float   imu_get_yaw(void) { return 0.0f; }
 void    imu_yaw_reset(void) { }
 uint8_t imu_yaw_is_valid(void) { return 0u; }
+uint8_t  imu_gz_saturated(void) { return 0u; }
+uint32_t imu_gz_sat_count(void) { return 0u; }
+void     imu_gz_sat_reset(void) { }
 #endif

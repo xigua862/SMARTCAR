@@ -146,6 +146,10 @@ void telemetry_report(void)
      遥测只有 20Hz，直接取几乎总是拿到空窗口。 */
   uint16_t k1m = 0u;
   line_follow_1k_stats(&k1m, NULL, NULL, NULL);   /* 只留"100Hz 漏看数"当信号灯 */
+  /* ★2026-09-26：K1 已从默认短行移除（换成 SAT/SATN），但这次调用【保留】——
+     它有副作用（取走 1kHz 采样窗口），去掉会改变相切点识别的行为。
+     变量本身不再打印，显式 (void) 掉以保持 0 警告。要恢复 K1= 时直接用它。 */
+  (void)k1m;
 
   char buf[112];
   int n = snprintf(buf, sizeof(buf),
@@ -156,12 +160,18 @@ void telemetry_report(void)
        GW = 相切点计数（0..GOURD_TOTAL）：葫芦里应该 1→2→0 然后右转；
             直角弯必须一直是 0（这正是判据成败的验收线）。
        IG = 是否在葫芦圈里：只在 IG=1 时 GW 才累计，IG=0 会把 GW 强制清零。
-       行长从 ~67 增到 ~78 字符，仍在 80 列内。 */
-    "FW:%s ST=%d IR:%s RPM1=%d RPM2=%d OD=%ld GZ=%d GW=%d IG=%d K1=%d\r\n",
+       行长从 ~67 增到 ~78 字符，仍在 80 列内。
+       ★2026-09-26 把 K1（1kHz 漏采统计）换成 SAT/SATN（陀螺削顶）：
+         K1 是"1kHz 采样漏了多少"的统计，当前诊断用不到；
+         而 SA 是"陀螺有没有削顶"——葫芦圈问题的关键未知数（见 imu.h 的长注释）。
+         SAT= 本拍是否削顶(0/1)，SATN= 开机以来累计削顶拍数。
+         ★要查相切点/出口识别时，把 K1= 换回来即可（line_follow_1k_stats）。 */
+    "FW:%s ST=%d IR:%s RPM1=%d RPM2=%d OD=%ld GZ=%d GW=%d IG=%d SAT=%d/%lu\r\n",
     FW_TAG, (int)car_fsm_state(), ir,
     speed_get_rpm(MOTOR_LEFT), speed_get_rpm(MOTOR_RIGHT),
     (long)odom_distance_mm(), (int)imu_get_gyro_z(),
-    (int)line_follow_gourd_waves(), (int)line_follow_in_gourd(), (int)k1m);
+    (int)line_follow_gourd_waves(), (int)line_follow_in_gourd(),
+    (int)imu_gz_saturated(), (unsigned long)imu_gz_sat_count());
   if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)n, 100);
 }
 

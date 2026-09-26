@@ -22,4 +22,13 @@ float   imu_get_gyro_z(void);     /* 偏航率 (°/s, 已减零偏; 正=左转) 
 float   imu_get_yaw(void);
 void    imu_yaw_reset(void);
 uint8_t imu_yaw_is_valid(void);   /* 0 = IMU 不在/没标定 → 别用它做控制, 走兜底 */
+
+/* ★★★ 2026-09-26 【陀螺削顶观测】—— 只观测，不改控制 ★★★
+   背景：±1000dps 档下实测 |GZ|>=990 占 7.4%（34/457），GZ=-995 重复 25 次 = 削顶铁证。
+   而更宽的 ±2000dps 档【写不进去/直接坏掉】（试过两次，见 imu.c 里的长注释），
+   所以削顶【改代码修不了】，只能先量清楚它到底是不是葫芦圈的瓶颈。
+   遥测 `SAT=`（本拍是否削顶）+ `SATN=`（累计次数）就是为这个加的。 */
+uint8_t  imu_gz_saturated(void);  /* 1 = 本拍陀螺 Z 削顶 */
+uint32_t imu_gz_sat_count(void);  /* 开机以来累计削顶拍数 */
+void     imu_gz_sat_reset(void);  /* 清零（每趟出发前可调） */
 #endif /* IMU_H */
