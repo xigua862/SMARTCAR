@@ -2112,6 +2112,62 @@ void line_follow_control(int16_t base)
     if (m2 < -WHEEL_FLOOR_MIN_CMD && m2 > -(int16_t)WHEEL_PWM_FLOOR) m2 = -(int16_t)WHEEL_PWM_FLOOR;
 #endif
 #endif
+    /* ★★★ G82【编码器"冻住"探测器】（只观测，不改控制）★★★
+     *
+     * 为什么加：G79/G80/G81 三趟都出现"某一轮读数一直 0~14、命令却高到 30~78"，
+     *   我先后当成"死区 / scrub 锁死 / 电机太弱"。G81 的运动学对账推翻了这些解释：
+     *     · 若那轮真停住、车绕它转 → 转弯半径 53mm → 偏航 **476 dps**（1.3 圈/秒，像陀螺）
+     *     · 若那轮在滚、只是编码器不计数 → 车在跟 R=300 的圆 → 偏航 **84 dps**
+     *   实测 GZ ≈ −60~−148（约 90），且 IR 连续 300mm 稳定在中间 ⇒ **是后者**。
+     *   ⇒ 读数在骗人（正交解码被电机噪声打乱时会净计数为 0），
+     *     速度环看见"转速=0"就拼命加 PWM ⇒ 那一侧被顶满 ⇒ 车被推着绕圈。
+     *   ⇒ 本探测器把它当场抓出来：打印时【同时给出另一轮转速与 GZ】——
+     *     只要出现 `other=170`（另一轮在跑）而 GZ 只有几十度/秒（不是几百），
+     *     就证明"这一轮其实在滚"⇒ 问题在编码器，不在电机/机械。
+     *
+     * 判据：命令 |PWM| ≥ 25 且本轮 |RPM| ≤ 14，连续 ≥ 30 拍（300ms）→ 打印一次；
+     *       恢复时再打印一次，带持续拍数与期间最大命令。 */
+    {
+      static uint16_t enc_frz_n[2]   = {0u, 0u};
+      static int16_t  enc_frz_max[2] = {0, 0};
+      static uint8_t  enc_frz_on[2]  = {0u, 0u};
+      const int16_t cmd[2] = { m1, m2 };
+      for (uint8_t v = 0u; v < 2u; v++)
+      {
+        int16_t cm = cmd[v]; if (cm < 0) cm = (int16_t)(-cm);
+        int16_t rp = speed_get_rpm((v < 1u) ? MOTOR_LEFT : MOTOR_RIGHT);
+        int16_t ra = (rp < 0) ? (int16_t)(-rp) : rp;
+        if ((cm >= 25) && (ra <= 14))
+        {
+          if (enc_frz_n[v] < 0xFFFFu) enc_frz_n[v]++;
+          if (cm > enc_frz_max[v]) enc_frz_max[v] = cm;
+          if ((!enc_frz_on[v]) && (enc_frz_n[v] >= 30u))
+          {
+            enc_frz_on[v] = 1u;
+            {
+              int16_t oth = speed_get_rpm((v < 1u) ? MOTOR_RIGHT : MOTOR_LEFT);
+              char eb[72];
+              (void)snprintf(eb, sizeof(eb), "ENCFREEZE %s cmd=%d rpm=%d other=%d GZ=%d",
+                             (v < 1u) ? "L" : "R", (int)cm, (int)rp, (int)oth,
+                             (int)imu_get_gyro_z());
+              telemetry_msg(eb);
+            }
+          }
+        }
+        else
+        {
+          if (enc_frz_on[v])
+          {
+            char eb[72];
+            (void)snprintf(eb, sizeof(eb), "ENCFREEZE %s END n=%u maxcmd=%d rpm=%d",
+                           (v < 1u) ? "L" : "R", (unsigned)enc_frz_n[v],
+                           (int)enc_frz_max[v], (int)rp);
+            telemetry_msg(eb);
+          }
+          enc_frz_n[v] = 0u; enc_frz_max[v] = 0; enc_frz_on[v] = 0u;
+        }
+      }
+    }
     /* ★★★ 2026-09-26 晚【把控制器的"决策"记进黑匣子】★★★
        为什么必须加：黑匣子原来只记 IR/RPM/PWM/GZ —— 那些是【结果】。
        实车"一直在绕圈"时，我无法从结果判断它到底是
@@ -2140,7 +2196,11 @@ void line_follow_control(int16_t base)
   motor_set_differential(m1, m2);
 
 #if USE_GOURD_SM && GOURD_USE_FLIP
+  /* ★G88：③"持续到抓住新线"实测【更差】（G87：一直困在第 1 圈、L/R=1.63 = 整趟一个方向绕），
+     已回退成 G86 的固定窗口；改走 ①：把 GOURD_FLIP_CYCLES 40 → 60。
+     下面这一行就是原来的写法（回退目标）。 */
   if (gourd_flip) gourd_flip--;   /* 翻转窗口倒计时 */
+
 #endif
 }
 
