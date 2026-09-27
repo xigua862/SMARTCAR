@@ -30,11 +30,11 @@ void pose_reset(void)
   s_prev_l  = odom_left_mm();    /* 上拍值同步重采（odom_reset 后不会跳变） */
   s_prev_r  = odom_right_mm();
   s_inited  = 1u;
+  imu_yaw_reset();               /* ★同步清零 IMU yaw 积分起点 */
 }
 
 void pose_step(void)
 {
-  const float dt = (float)CTRL_PERIOD_MS / 1000.0f;
   int32_t cur_l, cur_r;
   float dl, dr, d, yaw_new, yaw_mid;
 
@@ -52,8 +52,11 @@ void pose_step(void)
   s_prev_l = cur_l;
   s_prev_r = cur_r;
 
-  /* 航向：GZ 左正 → ψ 右正，取负 */
-  yaw_new = s_yaw_rad + (-imu_get_gyro_z()) * dt * (POSE_PI / 180.0f);
+  /* ★FIX 2026-09-26：航向不再自积分（原用固定 dt=CTRL_PERIOD_MS 导致欠积分 ~18%，
+     CARD-005 B1 实测左转 90° 只积到 72°）；
+     改用 imu_get_yaw()（已用 HAL_GetTick 实测 dt + 零偏补偿 + 连续角度）；
+     imu yaw 左正 → pose 右系顺时针为正，取负。 */
+  yaw_new = -(float)imu_get_yaw() * (POSE_PI / 180.0f);
 
   /* 中点航向法（二阶精度） */
   yaw_mid = s_yaw_rad + (yaw_new - s_yaw_rad) * 0.5f;
