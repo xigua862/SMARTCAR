@@ -4,6 +4,9 @@
 #include "drivers/motor.h"
 #include "drivers/line_sensor.h"
 #include "control/filter.h"
+#if USE_CORR_TRIM && USE_SYMMETRIC_CORR_TRIM
+#include "control/steering_trim.h"
+#endif
 #include "telemetry.h"        /* ★事件打印用 telemetry_msg("出葫芦弯道" 等) */
 #include <stdio.h>            /* snprintf: 拼"十字/分支口"事件行 */
 #if USE_IMU
@@ -155,7 +158,7 @@ static lpf_t d_lpf;
 #if USE_CORR_TRIM
 /* ★2026-09-26 转向环"曲率记忆"（带泄漏的转向微调）—— 见 app_config.h 的长注释。
    纯观测/慢修正量，不参与任何判定，随时可在 app_config.h 用一个宏关掉。 */
-static int16_t s_corr_trim = 0;
+static float s_corr_trim = 0.0f;
 #endif
 
 #if USE_SPEED_LOOP
@@ -166,6 +169,25 @@ static float  tgt_rpm[2] = {0, 0};
 /* ★2026-09-26 【诊断用】：最近一次真正下发给电机的 PWM。
    纯观测、不参与控制。用途见 line_follow_last_pwm() 的说明（头文件里）。 */
 static int16_t pwm_out[2] = {0, 0};
+
+/* 直接找线/停车后清除旧控制历史，避免重新接管时沿用原圆的偏置。 */
+static void reset_control_history(void)
+{
+  last_e = 0;
+#if USE_D_FILTER
+  lpf_init(&d_lpf, D_FILTER_ALPHA);
+#endif
+#if USE_CORR_TRIM
+  s_corr_trim = 0.0f;
+#endif
+#if USE_CORR_SLEW
+  s_corr_applied = 0;
+#endif
+#if USE_SPEED_LOOP
+  pid_reset(&spd_pid[0]);
+  pid_reset(&spd_pid[1]);
+#endif
+}
 
 /* ===========================================================================
  * ★★★ 葫芦圈【出口】检测（2026-09-23 用户实测特征）
@@ -968,6 +990,7 @@ void line_follow_control(int16_t base)
 
     if (ig_now)
     {
+      ge_plain_cnt = 0u;  /* 重新确认在圈内后，离开计数必须从头连续累计。 */
       ge_mark_ttl = (uint16_t)GOURD_ENTRY_MARK_TTL;    /* 在圈里 → 续命 */
       if (!ge_in_gourd)
       {
@@ -1468,7 +1491,11 @@ void line_follow_control(int16_t base)
        为什么：找线是原地旋转+满舵，刚看到线时往往只有【最边一路】
        （IR:00000001 / 10000000），e 直接就是满量程 → 立刻满舵反向甩 →
        又丢线 → 自激。压小这几拍，车头就能先稳下来。 */
-    if (lost_cycles > 0u) lost_settle = (uint8_t)LOST_SETTLE_FRAMES;
+    if (lost_cycles > LOST_SPIN_DELAY)
+    {
+      lost_settle = (uint8_t)LOST_SETTLE_FRAMES;
+      reset_control_history();
+    }
     last_error = r.error;
     lost_cycles = 0;
     line_lost = 0;
@@ -1477,19 +1504,18 @@ void line_follow_control(int16_t base)
   /* ---- 持续丢线: 原地旋转找线（超时停车防跑飞）---- */
   if (line_lost)
   {
+    int16_t spin = last_error >= 0 ? LOST_SPIN_SPEED : -LOST_SPIN_SPEED;
+    reset_control_history();
     if (lost_cycles > LOST_MAX_CYCLES)
     {
-      lost_cycles = (uint16_t)(LOST_MAX_CYCLES + 1);   /* 钉死，别让计数继续涨 */
-      motor_stop();
+      lost_cycles = (uint16_t)(LOST_MAX_CYCLES + 1);
+      spin = 0;
     }
-    else if (last_error >= 0)
-    {
-      motor_set_differential(LOST_SPIN_SPEED, -LOST_SPIN_SPEED);
-    }
-    else
-    {
-      motor_set_differential(-LOST_SPIN_SPEED, LOST_SPIN_SPEED);
-    }
+    pwm_out[0] = spin;
+    pwm_out[1] = (int16_t)-spin;
+    line_follow_dbg_set(0, spin, 0, lost_cycles,
+                        (uint8_t)(1u | (line_follow_in_gourd() ? 2u : 0u)));
+    motor_set_differential(spin, (int16_t)-spin);
     return;
   }
 
@@ -1661,6 +1687,23 @@ void line_follow_control(int16_t base)
     if (e < -(int8_t)LOST_SETTLE_ERR)  e = -(int8_t)LOST_SETTLE_ERR;
   }
 
+  /* 强制直行不能被滤波残留和曲率记忆抵消。 */
+  uint8_t straight_override = (uint8_t)(on_cross || s_wo_hold);
+#if WIDE_LONG_GO_STRAIGHT
+  if (wide_long) straight_override = 1u;
+#endif
+  if (straight_override)
+  {
+    e = 0;
+    last_e = 0;
+#if USE_D_FILTER
+    lpf_init(&d_lpf, D_FILTER_ALPHA);
+#endif
+#if USE_CORR_TRIM
+    s_corr_trim = 0.0f;
+#endif
+  }
+
   /* ---- PD 差速校正 ---- */
 #if USE_D_FILTER
   e = (int8_t)lpf_update(&d_lpf, (float)e);   /* 对误差低通, 压 D 项高频噪声 */
@@ -1670,27 +1713,24 @@ void line_follow_control(int16_t base)
   last_e = e;
 
 #if USE_CORR_TRIM
-  /* ★★★ 2026-09-26 转向环"曲率记忆"（带泄漏的转向微调）★★★
-     第 2 版：增长/衰减【不对称】。为什么、定量预期、怎么回退：
-     见 app_config.h 里 USE_CORR_TRIM 的长注释（含第 1 版实车失败的教训）。
-     一句话：纯 PD 在圆上必须维持 e_ss = D_req/KP 的恒定偏差才能顶住转弯差速，
-     而葫芦圈相切点要求转向【反号】→ 误差得先扫过 ±e_ss 才翻得过来。
-     这里把"当前需要的恒定差速"记下一部分，让 P 项不必独自顶它。
-
-     ★不对称是关键（第 1 版就栽在这里）：
-       UP 慢：只有【持续】的转弯需求才攒得起来，噪声/单拍闪烁攒不动。
-       DOWN 快：需求一反向（相切点！）立刻放手，不与新需求对抗。
-       改之前必须先看 app_config.h 里那条不变式 DOWN > UP。 */
-  float trim_err = (float)corr_pd - (float)s_corr_trim;
-  if (trim_err > 0.0f) s_corr_trim = (int16_t)((float)s_corr_trim + trim_err * CORR_TRIM_UP);
-  else                 s_corr_trim = (int16_t)((float)s_corr_trim + trim_err * CORR_TRIM_DOWN);
-  /* 泄漏：没有任何转弯需求时归 0，防止残留差速把直道带偏 */
-  if (s_corr_trim > 0)      s_corr_trim = (int16_t)((float)s_corr_trim - CORR_TRIM_LEAK);
-  else if (s_corr_trim < 0) s_corr_trim = (int16_t)((float)s_corr_trim + CORR_TRIM_LEAK);
-  if (s_corr_trim >  CORR_TRIM_MAX) s_corr_trim =  CORR_TRIM_MAX;
-  if (s_corr_trim < -CORR_TRIM_MAX) s_corr_trim = -CORR_TRIM_MAX;
-
-  int16_t corr = (int16_t)(corr_pd + s_corr_trim);
+  /* 增长/释放按幅值判断，左右转镜像对称，换向时不保留旧偏置。 */
+#if USE_SYMMETRIC_CORR_TRIM
+  float trim = steering_trim_update(&s_corr_trim, (float)corr_pd,
+                                    CORR_TRIM_UP, CORR_TRIM_DOWN,
+                                    CORR_TRIM_LEAK, CORR_TRIM_MAX);
+  int16_t corr = (int16_t)((float)corr_pd + trim);
+#else
+  /* 仅用于与 G40 对照：完整保留旧算法的整数截断与方向不对称。 */
+  int16_t legacy = (int16_t)s_corr_trim;
+  float delta = (float)corr_pd - legacy;
+  legacy = (int16_t)(legacy + delta * (delta > 0.0f ? CORR_TRIM_UP : CORR_TRIM_DOWN));
+  if (legacy > 0) legacy = (int16_t)(legacy - CORR_TRIM_LEAK);
+  else if (legacy < 0) legacy = (int16_t)(legacy + CORR_TRIM_LEAK);
+  if (legacy > CORR_TRIM_MAX) legacy = CORR_TRIM_MAX;
+  if (legacy < -CORR_TRIM_MAX) legacy = -CORR_TRIM_MAX;
+  s_corr_trim = (float)legacy;
+  int16_t corr = (int16_t)(corr_pd + legacy);
+#endif
 #else
   int16_t corr = corr_pd;
 #endif
@@ -1835,7 +1875,8 @@ void line_follow_control(int16_t base)
   spd_pid[1].bias = (float)m2;
 #endif
   {
-    float dt = (float)CTRL_PERIOD_MS / 1000.0f;
+    float dt = (float)speed_period_ms() / 1000.0f;
+    if (dt <= 0.0f || dt > 0.1f) dt = (float)CTRL_PERIOD_MS / 1000.0f;
     float o1 = pid_update(&spd_pid[0], tgt_rpm[0], (float)speed_get_rpm(MOTOR_LEFT),  dt);
     float o2 = pid_update(&spd_pid[1], tgt_rpm[1], (float)speed_get_rpm(MOTOR_RIGHT), dt);
 
@@ -1908,6 +1949,10 @@ void line_follow_control(int16_t base)
 
 void line_follow_stop(void)
 {
+  reset_control_history();
+  pwm_out[0] = 0;
+  pwm_out[1] = 0;
+  line_follow_dbg_set(0, 0, 0, lost_cycles, 0);
   motor_stop();
 }
 

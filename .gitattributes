@@ -1,2 +1,4 @@
 # 统一按二进制处理，不做 CRLF/LF 自动转换（避免 Windows/Keil 环境下整文件"假改动"）
 * -text
+# 已编译固件按原始字节保存，避免换行转换破坏文件校验值。
+firmware/**/*.hex -text -diff

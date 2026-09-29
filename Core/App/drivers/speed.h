@@ -3,19 +3,22 @@
 
 #include <stdint.h>
 
-/* 测速抽象: 现在=霍尔EXTI计数; 新车(USE_ENCODER=1)=编码器正交解码。
-   对上层只暴露 RPM 接口, 换测速方式只改这一层。 */
-
-/* 测速初始化 */
+/* 初始化编码器和全部测速状态，以当前计数作为首个窗口的起点。 */
 void speed_init(void);
 
-/* 计算本窗口(遥测周期500ms)的 RPM 并清零窗口计数。由遥测每周期调用一次 */
+/* 每个控制周期调用一次；按实际间隔测速，同毫秒调用不更新。 */
 void speed_update(void);
 
-/* 读最近一次 speed_update() 算好的 RPM(vol: MOTOR_LEFT/MOTOR_RIGHT) */
+/* 返回最近有效窗口的转速幅值；无效窗口保留显示值，控制前须检查有效性。 */
 int16_t speed_get_rpm(int vol);
 
-/* 原始脉冲计数(调试用) */
+/* 最近一次非零测速窗口的实际间隔；初始化后尚未采样时为 0。 */
+uint32_t speed_period_ms(void);
+
+/* 两轮最新窗口均合理且未超时才返回 1；不能识别断线造成的恒定零计数。 */
+uint8_t speed_feedback_valid(void);
+
+/* 原始累计脉冲计数，仅用于调试。 */
 uint16_t speed_get_count(int vol);
 
-#endif /* SPEED_H */
+#endif
