@@ -174,6 +174,12 @@ static float s_corr_trim = 0.0f;
 
 #if USE_SPEED_LOOP
 static pid_t spd_pid[2];   /* 左右轮速度环(编码器闭环) */
+#if SPD_DEAD_FB_GUARD
+/* ★2026-10-08【单轮测速断线】状态（判据与理由见 app_config.h 的 SPD_DEAD_FB_*）*/
+static uint16_t s_fb_dead_cnt[2] = {0, 0};   /* 连续满足"应该在转却没读数"的拍数 */
+static uint8_t  s_fb_dead[2]     = {0, 0};   /* 1 = 该轮测速判为断线 → 该轮退回开环 */
+static uint8_t  s_fb_dead_rep[2] = {0, 0};   /* 打印状态：0=未知 1=已报DEAD 2=已报OK */
+#endif
 static float  tgt_rpm[2] = {0, 0};
 #endif
 
@@ -2005,8 +2011,70 @@ void line_follow_control(int16_t base)
   {
     float dt = (float)speed_period_ms() / 1000.0f;
     if (dt <= 0.0f || dt > 0.1f) dt = (float)CTRL_PERIOD_MS / 1000.0f;
+    int16_t rpm_l = speed_get_rpm(MOTOR_LEFT);
+    int16_t rpm_r = speed_get_rpm(MOTOR_RIGHT);
+#if SPD_DEAD_FB_GUARD
+    /* ★2026-10-08【判"单轮测速断线"】—— 判据/证据/代价见 app_config.h 的 SPD_DEAD_FB_* 长注释。
+       一句话：测速恒为 0 而指令在动、另一轮在转 ⇒ 读数在骗人 ⇒ 该轮退回开环，
+       免得 PID 把假误差积分成 ±25 的偏置，把差速顶成不受控（R5 日志里的乱甩就是这么来的）。*/
+    {
+      int16_t rv[2];
+      int16_t cv[2];
+      uint8_t w;
+      rv[0] = rpm_l; rv[1] = rpm_r;
+      cv[0] = m1;    cv[1] = m2;
+      for (w = 0u; w < 2u; w++)
+      {
+        int16_t c = cv[w]; if (c < 0) c = (int16_t)(-c);
+        int16_t o = rv[(uint8_t)(1u - w)]; if (o < 0) o = (int16_t)(-o);
+
+        if ((c >= (int16_t)SPD_DEAD_FB_CMD) && (rv[w] <= (int16_t)SPD_DEAD_FB_RPM) &&
+            (o >= (int16_t)SPD_DEAD_FB_OTHER))
+        {
+          if (s_fb_dead_cnt[w] < 60000u) s_fb_dead_cnt[w]++;
+        }
+        else
+        {
+          s_fb_dead_cnt[w] = 0u;
+        }
+        s_fb_dead[w] = (uint8_t)((s_fb_dead_cnt[w] >= (uint16_t)SPD_DEAD_FB_FRAMES) ? 1u : 0u);
+
+        /* 状态切换的那一拍：把该轮 PID 对齐到当前误差（acc 清零 + prev_err 对齐），
+           这样"退回开环"和"接回闭环"都不会出现台阶。断线期间不调用 pid_update，
+           所以也不会攒出一个假的积分。 */
+        if ((s_fb_dead[w] != 0u) && (s_fb_dead_rep[w] != 1u))
+        {
+          char _m[72];
+          s_fb_dead_rep[w] = 1u;
+          spd_pid[w].acc       = 0.0f;
+          spd_pid[w].prev_err  = tgt_rpm[w] - (float)rv[w];
+          spd_pid[w].prev_meas = (float)rv[w];
+          spd_pid[w].first     = 1;
+          (void)snprintf(_m, sizeof(_m), "SPD-FB DEAD side=%s rpm=%d cmd=%d OD=%ld",
+                         (w == 0u) ? "L" : "R", (int)rv[w], (int)cv[w],
+                         (long)odom_distance_mm());
+          telemetry_msg(_m);
+        }
+        else if ((s_fb_dead[w] == 0u) && (s_fb_dead_rep[w] == 1u))
+        {
+          char _m[72];
+          s_fb_dead_rep[w] = 2u;
+          spd_pid[w].acc       = 0.0f;
+          spd_pid[w].prev_err  = tgt_rpm[w] - (float)rv[w];
+          spd_pid[w].prev_meas = (float)rv[w];
+          spd_pid[w].first     = 1;
+          (void)snprintf(_m, sizeof(_m), "SPD-FB OK side=%s rpm=%d OD=%ld",
+                         (w == 0u) ? "L" : "R", (int)rv[w], (long)odom_distance_mm());
+          telemetry_msg(_m);
+        }
+      }
+    }
+    float o1 = s_fb_dead[0] ? (float)m1 : pid_update(&spd_pid[0], tgt_rpm[0], (float)rpm_l, dt);
+    float o2 = s_fb_dead[1] ? (float)m2 : pid_update(&spd_pid[1], tgt_rpm[1], (float)rpm_r, dt);
+#else
     float o1 = pid_update(&spd_pid[0], tgt_rpm[0], (float)speed_get_rpm(MOTOR_LEFT),  dt);
     float o2 = pid_update(&spd_pid[1], tgt_rpm[1], (float)speed_get_rpm(MOTOR_RIGHT), dt);
+#endif
 
     /* ★2026-09-26 左右轮效率补偿：最终输出也按增益缩放。
        ★为什么"目标转速不缩放、只缩放输出"：
