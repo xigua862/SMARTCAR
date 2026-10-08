@@ -301,7 +301,7 @@
 
 /* ★ 固件版本标签：每行遥测都带着它 → 一眼确认"烧没烧、烧的是哪版"
    改完代码请更新（格式 MMDD-HHMM），开机横幅里还会打印编译时间(__DATE__/__TIME__)作双重确认 */
-#define FW_TAG               "1008-R26"
+#define FW_TAG               "1008-R27"
 
 /* 丢线找线参数 */
 #define LOST_SPIN_DELAY      2           /* 丢线后先沿原方向修正的周期数 */
@@ -1720,7 +1720,7 @@
  * ==========================================================================*/
 #define USE_BRANCH_EDGE         1     /* 1=启用；0=回退到 0929-R1 */
 #define BRANCH_EDGE_N           2     /* 只用该侧最靠外的 N 路（用户："两个传感器"）*/
-#define BRANCH_EDGE_MIN_ACT     4   /* ★R26：5 → 4。理由见提交信息：失败趟台账只有 4 条触发、第 5 个切点没触发 */     /* 触发门槛：亮路数 >= 这个（= 宽图案）*/
+#define BRANCH_EDGE_MIN_ACT     5   /* ★R27：回到 5。它只用于【只有一坨】那条支路（1 的路数 >= 5）；两坨那条不看路数 */     /* 触发门槛：亮路数 >= 这个（= 宽图案）*/
 #define BRANCH_EDGE_HOLD_FRAMES 60    /* 单次最长保持 60 拍 = 600ms（兜底，防卡死）*/
 #define BRANCH_EDGE_EXIT_FRAMES 2     /* 连续 2 拍普通线 → 退出 */
 #define BRANCH_EDGE_PLAIN_ACT   3     /* <=3 路 = 普通线（退出判据用）*/

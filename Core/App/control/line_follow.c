@@ -780,8 +780,18 @@ void line_follow_control(int16_t base)
 #else
       uint8_t gate = 1u;
 #endif
-      if ((gate != 0u) && (cnt >= (uint8_t)BRANCH_EDGE_MIN_ACT) &&
-          (cnt <= (uint8_t)CROSS_ACTIVE_MAX) && ((w1 != 0u) || (nblob >= 2u)))
+      /* ★★★ 2026-10-08（1008-R27）【触发判据按用户定稿重写】★★★
+         触发 =  两坨（1 的团数 >= 2，两团之间必然隔着 0）
+               或  只有一坨 且 1 的路数 >= BRANCH_EDGE_MIN_ACT(5)
+         为什么这样对：
+           · 切点的本质是"一条线被撕成两段" ⇒ 结构特征是【两坨】，不是"亮的总路数" ✗；
+             普通线（2~3 路、一坨）被 >=5 挡在外面 ✓；
+           · 用户指定的"极端情况 00011100（3 路一坨）"同样被 >=5 挡掉 ✓；
+           · 一坨很宽（例如 01111100 = 5 路一坨）也算切点 ✓（用户 #3）。
+         ★R26 之前的写法是 (路数>=5) 【且】(一端被顶住 或 团数>=2) —— 用"且"、且主判据选错
+           ⇒ 第 5、第 6 个切点漏触发（台账实测只有 4~5 条，而葫芦圈需要 7 条）。 */
+      if ((gate != 0u) && (cnt <= (uint8_t)CROSS_ACTIVE_MAX) &&
+          ((nblob >= 2u) || ((nblob == 1u) && (cnt >= (uint8_t)BRANCH_EDGE_MIN_ACT))))
       {
         if (s_be_conf < 255u) s_be_conf++;
       }
