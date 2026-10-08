@@ -383,10 +383,25 @@ static uint8_t ge_is_entry_pattern(uint16_t raw)
 static uint16_t start_blind = 0;
 #endif
 
+#if USE_GOURD_ODOM_ARM
+/* ★2026-10-08（1008-R21）里程闸门的状态（依据/标定/风险见 app_config.h 的 GOURD_ARM_MM）*/
+static uint8_t s_gourd_armed = 0u;   /* 1 = 里程已越过阈值 ⇒ 启用葫芦圈那套逻辑 */
+#endif
+
 void line_follow_control(int16_t base)
 {
   line_reading_t r = line_read();
   int8_t e = r.error;
+
+#if USE_GOURD_ODOM_ARM
+  /* ★★★ 2026-10-08（1008-R21）【里程闸门】用户方案 ★★★
+     一句话：起点发车后，里程没到 GOURD_ARM_MM 之前，葫芦圈那套逻辑一律不启用
+       （分支口接管 / 出圈 / 相切点计数），防止被沿途的直角弯误触发带偏。
+     为什么它能取代"进圈印记"：里程只增不减、不依赖图案与陀螺、越过了就永远越过
+       ⇒ 不存在"错误状态被锁存下来"这种事（那正是 R20 咬人的地方）。
+     放在函数最前面：下面的分支口块与出圈块都读它。 */
+  s_gourd_armed = (odom_distance_mm() >= (int32_t)GOURD_ARM_MM) ? 1u : 0u;
+#endif
 
 #if USE_GOURD_OPENLOOP
   /* ==========================================================================
@@ -714,7 +729,10 @@ void line_follow_control(int16_t base)
       uint8_t tL = (uint8_t)((L == 0u) ? 1u : 0u);
       uint8_t tR = (uint8_t)((R == (uint8_t)(LINE_CHANNELS - 1u)) ? 1u : 0u);
       uint8_t w1 = (uint8_t)((tL != tR) ? 1u : 0u);
-#if BRANCH_EDGE_GOURD_ONLY
+#if USE_GOURD_ODOM_ARM
+      /* ★R21：闸门改用【里程】（用户方案）—— 只在越过 GOURD_ARM_MM 之后才允许接管 */
+      uint8_t gate = s_gourd_armed;
+#elif BRANCH_EDGE_GOURD_ONLY
       uint8_t gate = ge_in_gourd;
 #else
       uint8_t gate = 1u;
@@ -1383,7 +1401,14 @@ void line_follow_control(int16_t base)
            `line_lost` 是在本函数【下面】的丢线处理里更新的 → 这里读到的是上一拍的值。
            `lost_cycles` 是本拍已经累加过的全灭计时器，不受位置影响。
            条件与丢线处理的判定一致：lost_cycles > LOST_SPIN_DELAY 才算"持续丢线"。 */
+#if USE_GOURD_ODOM_ARM
+      /* ★R21：出圈走同一条【里程闸门】。
+         原来用 ge_in_gourd —— 它会被直角弯误置位，而 R20 让它"活过整趟"之后，
+         一次误置位就再也纠不回来（实测 GE=1 但车并没出去）。 */
+      if ((trig_now == 0u) && s_gourd_armed && (lost_cycles > (uint16_t)LOST_SPIN_DELAY))
+#else
       if ((trig_now == 0u) && ge_in_gourd && (lost_cycles > (uint16_t)LOST_SPIN_DELAY))
+#endif
       {
         trig_now = 2u;
       }
