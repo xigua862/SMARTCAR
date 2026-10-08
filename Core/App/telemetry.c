@@ -213,6 +213,29 @@ void telemetry_trace_tick(void)
     if (s_still >= 20u) return;              /* 净里程 ~1 秒（20 帧 × 50ms）没变 → 冻结黑匣子 */
   }
 
+  /* ★★★ 2026-10-08（1008-R15）【事件冻结：第一次"真丢线"就停住】★★★
+     为什么必须加：缓冲是"最后 5.5 秒行驶画面"，而失败之后车会一直绕圈 ——
+       实测那次失败读出来的画面 OD 已经是 **12010mm（12 米）**，即绕了很久之后，
+       出事那一刻早被冲掉 ⇒ 永远看不到"为什么没跨过去"。
+     判据：dbg 的丢线计数 dc > LOST_SPIN_DELAY（= 已经进入"原地旋转找线"，
+       不是一闪而过）连续 2 帧 ⇒ 判定"真出事" ⇒ 永久冻结（本次上电内）。
+     ⇒ 下次一失败，缓冲区里保住的就是**出事前那 5.5 秒**（跨切点/丢线那一下）。
+     ★只影响记录；不影响控制。要回退：删掉这一块。 */
+  {
+    static uint8_t s_lost_seen = 0u;
+    int8_t  de0;
+    int16_t dc0, ds0;
+    uint16_t dcy0;
+    uint8_t  df0;
+    line_follow_dbg_get(&de0, &dc0, &ds0, &dcy0, &df0);
+    (void)de0; (void)dc0; (void)ds0; (void)df0;
+    if (dcy0 > (uint16_t)LOST_SPIN_DELAY)
+    {
+      if (s_lost_seen < 255u) s_lost_seen++;
+    }
+    if (s_lost_seen >= 2u) return;           /* 第一次真丢线 → 冻住，保住出事前 5.5 秒 */
+  }
+
   line_reading_t r = line_read();
   s_tr[s_tr_i].od = (uint16_t)odom_distance_mm();
   s_tr[s_tr_i].gz = (int16_t)imu_get_gyro_z();
