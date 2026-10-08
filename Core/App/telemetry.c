@@ -275,6 +275,21 @@ void telemetry_report(void)
      变量本身不再打印，显式 (void) 掉以保持 0 警告。要恢复 K1= 时直接用它。 */
   (void)k1m;
 
+  /* ★2026-10-08（1008-R5，纯观测版）【把 AR/AN 换成现在真正需要的量】★
+     为什么换：AR/AN 在 GOURD_ARC_FLIP=0 下【恒为 0】（作者自己写着"恒为 0 = 机制
+       从未跑起来"）—— 白占位置。而排查"直行残余抖动 + 右轮测速可疑"缺的正是：
+         C = 本拍差速修正 corr（±99 夹过）→ 看它摆多大、什么相位
+         P = 本拍【真正下发】的左右轮 PWM → 与 RPM 一对照就能分岔：
+              · 左 33 / 右 58 而 RPM 右 = 0/14 ⇒ 右轮速度环被假反馈推到饱和
+              · 左 ≈ 右 而 RPM 右 = 0/14          ⇒ 右轮电机/机械确实慢（另一条路）
+         S = 本拍速度基准（sp）→ 看自适应速度有没有在 30/24 之间反复跳
+     本版【不改任何控制行为】，只改打印字段（行长 ~72 字符，仍在 80 列内）。 */
+  int8_t   be_e = 0; int16_t be_cor = 0, be_sp = 0; uint16_t be_dcy = 0; uint8_t be_flg = 0;
+  int16_t  pwm_l = 0, pwm_r = 0;
+  line_follow_dbg_get(&be_e, &be_cor, &be_sp, &be_dcy, &be_flg);
+  line_follow_last_pwm(&pwm_l, &pwm_r);
+  (void)be_e; (void)be_dcy; (void)be_flg;   /* 本版不打印（IR 已隐含 e），显式 void 保 0 警告 */
+
   char buf[112];
   int n = snprintf(buf, sizeof(buf),
     /* ★2026-09-24 加 GW= 与 IG= —— 必须加，否则出圈判据没法验证：
@@ -301,12 +316,16 @@ void telemetry_report(void)
          IR / RPM / OD / GZ / AR / AN / IG
        删掉：ST=（跑车中恒为 2）、GW=/SAT=/SATN=（本次不查，要查时从 git 历史恢复）。
        AR/AN 定义见 line_follow.h；AR 阈值 = GOURD_ARC_FLIP_MDEG。 */
-    "FW:%s IR:%s RPM %d/%d OD %ld GZ %d IG %d AR %ld AN %u\r\n",
+    "FW:%s IR:%s RPM %d/%d P %d/%d C %d S %d OD %ld GZ %d IG %d\r\n",
     FW_TAG, ir,
     speed_get_rpm(MOTOR_LEFT), speed_get_rpm(MOTOR_RIGHT),
-    (long)odom_distance_mm(), (int)imu_get_gyro_z(),
-    (int)line_follow_in_gourd(),
-    (long)line_follow_arc_mdeg(), (unsigned)line_follow_arc_trigs());
+    (int)pwm_l, (int)pwm_r,           /* ★P: 真正下发的 PWM（本函数顶部有判据说明）*/
+    (int)be_cor,                      /* ★C: 本拍差速修正 corr（±99 夹过）*/
+    (int)be_sp,                       /* ★S: 本拍速度基准（自适应速度会改它）*/
+    (long)odom_distance_mm(),         /* ★OD: 净位移(mm), 从起步算起, 前进为正 */
+    (int)imu_get_gyro_z(),            /* ★GZ: 偏航角速度(dps), 正=左转 */
+    (int)line_follow_in_gourd()       /* ★IG: 1=当前在葫芦圈里 */
+    );
   if (n > 0) tx_send((const uint8_t*)buf, (uint16_t)n);
 }
 
