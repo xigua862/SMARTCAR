@@ -301,7 +301,7 @@
 
 /* ★ 固件版本标签：每行遥测都带着它 → 一眼确认"烧没烧、烧的是哪版"
    改完代码请更新（格式 MMDD-HHMM），开机横幅里还会打印编译时间(__DATE__/__TIME__)作双重确认 */
-#define FW_TAG               "1008-R22"
+#define FW_TAG               "1008-R23"
 
 /* 丢线找线参数 */
 #define LOST_SPIN_DELAY      2           /* 丢线后先沿原方向修正的周期数 */
@@ -1789,10 +1789,19 @@
  *    下一轮开减速时要注意：内轮命令 = sp − corr，太小会被 WHEEL_PWM_FLOOR(20) 抬上去
  *    ⇒ 差速被吃掉 ⇒ 出口前跑不圆。所以减速要温和（24 → 20），不要一步到 12。 */
 #define USE_GOURD_EXIT_ZONE    1        /* 1 = 启用判据⑤（里程窗口 + T 形图案）*/
+#define GOURD_EXIT_CALIB_ONLY  1        /* ★★★ 标定模式（1008-R23）：只记录、**绝不转向** ★★★
+                                           R22 的教训：我让占位窗口 12500 落在了可触发的范围内 ⇒
+                                           车在葫芦圈【中途】看到一个 11000000（左弯边缘的假图案）
+                                           ⇒ 误判成出口、右转一次 ⇒ s_gourd_done=1 ⇒ 里程闸门关闭
+                                           ⇒ 分支口不再接管 ⇒ 切点过不去、一直绕第一圈 ✗✗✗
+                                           ⇒ 所以标定期间必须把"转向"这条路彻底切断：
+                                              1 = 只把候选图案记进 RAM（我读芯片取），永不转向；
+                                              0 = 正常判据（标定完成后再改 0）。
+                                           ★这就是"先测后打"的正确做法，别再让占位值参与决策。 */
 #define GOURD_EXIT_WINDOW_MM   12500    /* ★占位值（待标定）：起点 → T 形口的总里程 */
 #define GOURD_EXIT_WIN_HALF    250      /* 窗口半宽（±250mm）*/
 #define GOURD_EXIT_PATTERN     0x0003u  /* ★占位值（待标定）：T 形候选 = 只有最左 2 路亮 */
-#define GOURD_EXIT_LOG_MAX     24       /* 标定用：最多打几行 "T-CAND" */
+#define GOURD_EXIT_LOG_MAX     24       /* 标定用：RAM 里最多存几条候选记录 */
 #define GOURD_EXIT_DEADLINE_MM 0        /* 兜底：里程 ≥ 窗口+此值时无条件右转。0 = 关（本版）*/
 #define GOURD_EXIT_SLOW_EN     0        /* 减速区：本版关（下一轮单独开，见上面的提醒）*/
 #define GOURD_EXIT_SLOW_PWM    20       /* 减速后的速度基准（温和：24 → 20）*/

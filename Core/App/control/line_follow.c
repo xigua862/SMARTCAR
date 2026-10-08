@@ -388,9 +388,21 @@ static uint16_t start_blind = 0;
 static uint8_t s_gourd_armed = 0u;   /* 1 = 里程已越过阈值 ⇒ 启用葫芦圈那套逻辑 */
 #endif
 #if USE_GOURD_EXIT_ZONE
-/* ★2026-10-08（1008-R22）出圈"里程窗口+图案"判据⑤的状态 */
+/* ★2026-10-08（1008-R22/R23）出圈"里程窗口+图案"判据⑤的状态 */
 static uint8_t  s_gourd_done = 0u;   /* 1 = 本次已出圈转过 ⇒ 葫芦圈逻辑全部关掉（里程闸门也跟着关）*/
-static uint16_t s_exit_log_n = 0u;   /* 已打印的 T-CAND 标定行数 */
+/* ★R23：候选图案的 RAM 记录（标定用）。**不再走串口** ——
+   原因：telemetry_msg 是阻塞发送（一行 ~6ms @115200，占 10ms 控制拍的 60%），
+   在控制循环里打印会拖慢节拍；而且用户还得手工贴日志。
+   改存 RAM：我用 DAPLink 直接读（read_trace.ps1 已支持）。 */
+static uint16_t s_exit_log_n = 0u;   /* 已记录的候选条数 */
+typedef struct {
+  int32_t  od;      /* 当时的里程（起点起算） */
+  uint16_t raw;     /* 当前拍 8 位图 */
+  uint16_t raw1k;   /* 1kHz 窗口里最宽的那张位图 */
+  uint8_t  mx;      /* 该窗口的亮路数 */
+  uint8_t  inwin;   /* 当时是否落在窗口内（占位窗口，仅参考） */
+} tcand_t;
+static tcand_t s_tcand[GOURD_EXIT_LOG_MAX];
 #if GOURD_EXIT_SLOW_EN
 static uint8_t  s_slow_req   = 0u;   /* 1 = 请求减速（减速区）*/
 #endif
@@ -1506,26 +1518,30 @@ void line_follow_control(int16_t base)
                                     ? 1u : 0u);
         uint8_t  cand   = (uint8_t)(((pat & (uint16_t)GOURD_EXIT_PATTERN) != 0u) ? 1u : 0u);
 
-        /* ★标定日志：armed 之后每见一次候选图案就报一行（带里程、两个位图、是否在窗口内）。
-           这一趟跑完，从这些行就能定下"出口到底在多少里程""T 形图案到底是哪个位图"。 */
+        /* ★R23：候选图案记进 【RAM】，不再走串口。
+           为什么改：telemetry_msg 是阻塞发送（一行 ~6ms @115200，占 10ms 控制拍的 60%），
+           在控制循环里打印会拖慢节拍；而且用户还得手工贴日志。
+           改存 RAM ⇒ 我用 DAPLink 直接读芯片（read_trace.ps1 已支持），两边都干净。 */
         if ((s_gourd_armed != 0u) && (cand != 0u) && (s_exit_log_n < (uint16_t)GOURD_EXIT_LOG_MAX))
         {
-          char _m[128];
+          s_tcand[s_exit_log_n].od    = od_now;
+          s_tcand[s_exit_log_n].raw   = (uint16_t)(r.raw & 0xFFu);
+          s_tcand[s_exit_log_n].raw1k = s_1k_maxraw;
+          s_tcand[s_exit_log_n].mx    = s_1k_maxact;
+          s_tcand[s_exit_log_n].inwin = in_win;
           s_exit_log_n++;
-          (void)snprintf(_m, sizeof(_m),
-                         "T-CAND #%u OD=%ld raw=%02X 1kraw=%04X mx=%u inwin=%u win=%ld",
-                         (unsigned)s_exit_log_n, (long)od_now,
-                         (unsigned)(r.raw & 0xFFu), (unsigned)s_1k_maxraw,
-                         (unsigned)s_1k_maxact, (unsigned)in_win,
-                         (long)(int32_t)GOURD_EXIT_WINDOW_MM);
-          telemetry_msg(_m);
         }
 
+#if !GOURD_EXIT_CALIB_ONLY
+        /* ★R23：标定模式下这一段【整段不编译】⇒ 物理上不可能误转向。
+           （R22 的教训：占位窗口 12500 落在可触发范围内 ⇒ 葫芦圈中途误判成出口 ⇒
+             右转一次 ⇒ s_gourd_done 关掉里程闸门 ⇒ 分支口不再接管 ⇒ 卡在第一圈 ✗✗✗） */
         if ((s_gourd_armed != 0u) && (in_win != 0u) && (cand != 0u))
         {
           trig_now = 5u;
         }
-#if (GOURD_EXIT_DEADLINE_MM > 0)
+#endif
+#if (GOURD_EXIT_DEADLINE_MM > 0) && !GOURD_EXIT_CALIB_ONLY
         /* 兜底（本版默认关）：线再怎么不出现 T 图案，里程过了窗口+余量也强制右转 */
         if ((trig_now == 0u) && (s_gourd_armed != 0u) &&
             (od_now >= (int32_t)(GOURD_EXIT_WINDOW_MM + GOURD_EXIT_DEADLINE_MM)))
@@ -2933,6 +2949,24 @@ uint16_t line_follow_1k_missed(void)
 {
   return s_1k_missed;
 }
+
+#if USE_GOURD_EXIT_ZONE
+/* ★R23：把"候选图案记录"读出去。
+   两个作用：① 给遥测/诊断用；② 让 s_tcand 不再"只写不读"
+   （ARMCC 对只写不读的数组报 #550-D，本项目要求 0 警告）。
+   返回 0 = 该下标还没有记录。 */
+uint8_t line_follow_tcand_get(uint16_t i, int32_t *od, uint16_t *raw, uint16_t *raw1k,
+                              uint8_t *mx, uint8_t *inwin)
+{
+  if ((i >= (uint16_t)GOURD_EXIT_LOG_MAX) || (i >= s_exit_log_n)) return 0u;
+  if (od    != 0) { *od    = s_tcand[i].od;    }
+  if (raw   != 0) { *raw   = s_tcand[i].raw;   }
+  if (raw1k != 0) { *raw1k = s_tcand[i].raw1k; }
+  if (mx    != 0) { *mx    = s_tcand[i].mx;    }
+  if (inwin != 0) { *inwin = s_tcand[i].inwin; }
+  return 1u;
+}
+#endif
 
 /* ★本窗口 1kHz 采样的完整统计（遥测 K1=missed/total 与 MX=maxact/maxraw）。
      传 NULL 就不取那一项。★必须在 line_follow_control 之后读（它负责填充）。 */
