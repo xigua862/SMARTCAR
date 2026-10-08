@@ -176,9 +176,10 @@ static float s_corr_trim = 0.0f;
 static pid_t spd_pid[2];   /* 左右轮速度环(编码器闭环) */
 #if SPD_DEAD_FB_GUARD
 /* ★2026-10-08【单轮测速断线】状态（判据与理由见 app_config.h 的 SPD_DEAD_FB_*）*/
-static uint16_t s_fb_dead_cnt[2] = {0, 0};   /* 连续满足"应该在转却没读数"的拍数 */
+static uint16_t s_fb_dead_cnt[2] = {0, 0};   /* 漏桶计数：满足 +1、不满足 −1 */
 static uint8_t  s_fb_dead[2]     = {0, 0};   /* 1 = 该轮测速判为断线 → 该轮退回开环 */
 static uint8_t  s_fb_dead_rep[2] = {0, 0};   /* 打印状态：0=未知 1=已报DEAD 2=已报OK */
+static uint16_t s_fb_move        = 0;        /* "车在动"锁存的剩余拍数（任一测速>=MOVE 就续期）*/
 #endif
 static float  tgt_rpm[2] = {0, 0};
 #endif
@@ -2020,24 +2021,38 @@ void line_follow_control(int16_t base)
     {
       int16_t rv[2];
       int16_t cv[2];
+      int16_t amax;
       uint8_t w;
       rv[0] = rpm_l; rv[1] = rpm_r;
       cv[0] = m1;    cv[1] = m2;
+
+      /* ③ "车在动"锁存：任一测速 >= MOVE 就续期 HOLD 拍。
+         ★为什么不用"另一轮连续 >=60"：实车 FW:1008-R6 里车一甩，左轮就掉到 16~38，
+           连续 20 拍永远凑不齐 ⇒ 第一版保护从未触发（见 app_config.h 的二次修正说明）。*/
+      amax = (rv[0] < 0) ? (int16_t)(-rv[0]) : rv[0];
+      {
+        int16_t a2 = (rv[1] < 0) ? (int16_t)(-rv[1]) : rv[1];
+        if (a2 > amax) amax = a2;
+      }
+      if (amax >= (int16_t)SPD_DEAD_FB_MOVE) s_fb_move = (uint16_t)SPD_DEAD_FB_HOLD;
+      else if (s_fb_move != 0u) s_fb_move--;
+
       for (w = 0u; w < 2u; w++)
       {
         int16_t c = cv[w]; if (c < 0) c = (int16_t)(-c);
-        int16_t o = rv[(uint8_t)(1u - w)]; if (o < 0) o = (int16_t)(-o);
 
+        /* ①②+漏桶：该轮在被驱动(c>=CMD) 却完全没有读数(rpm<=RPM)，且车确实在动。
+           ★漏桶（满足 +1 / 不满足 −1）而不是"连续 N 拍"：corr 来回摆也能攒上去。 */
         if ((c >= (int16_t)SPD_DEAD_FB_CMD) && (rv[w] <= (int16_t)SPD_DEAD_FB_RPM) &&
-            (o >= (int16_t)SPD_DEAD_FB_OTHER))
+            (s_fb_move != 0u))
         {
           if (s_fb_dead_cnt[w] < 60000u) s_fb_dead_cnt[w]++;
         }
-        else
+        else if (s_fb_dead_cnt[w] != 0u)
         {
-          s_fb_dead_cnt[w] = 0u;
+          s_fb_dead_cnt[w]--;
         }
-        s_fb_dead[w] = (uint8_t)((s_fb_dead_cnt[w] >= (uint16_t)SPD_DEAD_FB_FRAMES) ? 1u : 0u);
+        s_fb_dead[w] = (uint8_t)((s_fb_dead_cnt[w] >= (uint16_t)SPD_DEAD_FB_LEVEL) ? 1u : 0u);
 
         /* 状态切换的那一拍：把该轮 PID 对齐到当前误差（acc 清零 + prev_err 对齐），
            这样"退回开环"和"接回闭环"都不会出现台阶。断线期间不调用 pid_update，
