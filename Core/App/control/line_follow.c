@@ -50,6 +50,17 @@ static uint8_t  wide_cnt    = 0;   /* 宽图案持续拍数 */
 static uint8_t  on_cross    = 0;   /* 1 = 判定为十字（直行通过） */
 static uint8_t  wide_long   = 0;   /* 1 = 宽图案持续过久 → 不是十字（圆出口/直角入口） */
 static uint8_t  s_wo_hold   = 0;   /* ★相切点强制直行剩余拍数（WIDE_ONE_GO_STRAIGHT）*/
+#if USE_BRANCH_EDGE
+/* ★2026-10-08【分支口：只跟"一侧最靠外的 N 路"】(用户方案) 状态。
+   触发/退出判据见下面 line_follow_control 里的 BRANCH-EDGE 块；误差来源见 PD 之前那段。*/
+static uint8_t  s_be_on     = 0;   /* 1 = 正在"只跟一侧" */
+static uint8_t  s_be_side   = 1;   /* 本次跟哪侧：1 = 左(bit0 方向), 0 = 右 */
+static uint8_t  s_be_next_l = (uint8_t)BRANCH_EDGE_FIRST_LEFT;  /* 下次用哪侧（左右交替）*/
+static uint8_t  s_be_plain  = 0;   /* 连续"普通线"拍数（退出判据）*/
+static uint8_t  s_be_fr     = 0;   /* 本次已保持拍数（兜底上限）*/
+static uint8_t  s_be_just   = 0;   /* 本拍刚进入（用于对齐 last_e，避免 D 项踢一脚）*/
+static uint16_t s_be_events = 0;   /* 触发次数（日志用）*/
+#endif
 #if GOURD_ARC_FLIP
 static int32_t  s_arc_mdeg  = 0;   /* ★同号偏航累计（毫度）—— 绕圈/相切点检测 */
 static uint8_t  s_arc_push  = 0;   /* ★反向打舵剩余拍数 */
@@ -612,6 +623,102 @@ void line_follow_control(int16_t base)
     }
   }
 #endif
+
+#if USE_BRANCH_EDGE
+  /* ==========================================================================
+   * ★★★ 2026-10-08【异常点位 → 只跟"一侧最靠外的 N 路"】（用户方案）★★★
+   *
+   *  用户原话："当小车判到异常点位时，只根据左边或者右边两个传感器巡线；
+   *            一开始是左边，之后是左右交替轮换。"
+   *
+   *  【为什么可能有用 · 几何】两条分支在分叉口张开时，8 路权重求和的质心落在
+   *    【两条分支中间】→ 等于"谁都不跟"→ 车顺着原圆继续绕（这就是"多绕一圈"的机制）。
+   *    只取一侧最靠外的 N 路 = 真的咬住其中一条分支。
+   *    实车日志里的分叉图案 11100011：全路和只有 -5（几乎不转），
+   *    而左侧两路 = -13、右侧两路 = +13。
+   *
+   *  【触发】宽图案（亮路数 >= BRANCH_EDGE_MIN_ACT）且 亮路数 <= CROSS_ACTIVE_MAX
+   *          （7~8 路 = 厚黑块/线材横穿，几何上不是分叉口 —— 与相切点判据同一理由）
+   *          且满足 ①只贴一端 或 ②出现 >=2 个分离的团。
+   *  【动作】本拍误差改用该侧最靠外的 N 路（见下面 PD 之前那段覆盖）。
+   *  【退出】连续 BRANCH_EDGE_EXIT_FRAMES 拍回到普通线；或保持超过
+   *          BRANCH_EDGE_HOLD_FRAMES 拍兜底。
+   *
+   *  ★本块【只改误差来源】：不动速度、不动 PWM 下限、不动其他任何开关。
+   *  ★回退：USE_BRANCH_EDGE 改 0（= 完全回到 0929-R1 行为，本块整段不编译）。
+   * ==========================================================================*/
+  {
+    uint8_t L = 0xFFu, R = 0u, cnt = 0u, nblob = 0u, prev = 0u, i;
+
+    for (i = 0u; i < (uint8_t)LINE_CHANNELS; i++)
+    {
+      uint8_t b = (uint8_t)((r.raw >> i) & 1u);
+      if (b != 0u)
+      {
+        if (L == 0xFFu) L = i;
+        R = i;
+        cnt++;
+      }
+      if ((b != 0u) && (prev == 0u)) nblob++;   /* 连续 1 的段数 = 几个分离的团 */
+      prev = b;
+    }
+
+    if (s_be_on)
+    {
+      if (s_be_fr < 255u) s_be_fr++;
+      /* "普通线" = 只有 1 个团、且亮路数很少 */
+      if ((cnt >= 1u) && (cnt <= (uint8_t)BRANCH_EDGE_PLAIN_ACT) && (nblob <= 1u))
+      {
+        if (s_be_plain < 255u) s_be_plain++;
+      }
+      else
+      {
+        s_be_plain = 0u;
+      }
+
+      if ((s_be_plain >= (uint8_t)BRANCH_EDGE_EXIT_FRAMES) ||
+          (s_be_fr >= (uint8_t)BRANCH_EDGE_HOLD_FRAMES))
+      {
+        char _m[80];
+        s_be_on = 0u;
+        (void)snprintf(_m, sizeof(_m),
+                       "BRANCH-EDGE off: fr=%u act=%u nb=%u OD=%ld",
+                       (unsigned)s_be_fr, (unsigned)cnt, (unsigned)nblob,
+                       (long)odom_distance_mm());
+        telemetry_msg(_m);
+      }
+    }
+    else
+    {
+      uint8_t tL = (uint8_t)((L == 0u) ? 1u : 0u);
+      uint8_t tR = (uint8_t)((R == (uint8_t)(LINE_CHANNELS - 1u)) ? 1u : 0u);
+      uint8_t w1 = (uint8_t)((tL != tR) ? 1u : 0u);
+#if BRANCH_EDGE_GOURD_ONLY
+      uint8_t gate = ge_in_gourd;
+#else
+      uint8_t gate = 1u;
+#endif
+      if ((gate != 0u) && (cnt >= (uint8_t)BRANCH_EDGE_MIN_ACT) &&
+          (cnt <= (uint8_t)CROSS_ACTIVE_MAX) && ((w1 != 0u) || (nblob >= 2u)))
+      {
+        char _m[96];
+        s_be_on     = 1u;
+        s_be_side   = s_be_next_l;                        /* 1 = 左, 0 = 右 */
+        s_be_next_l = (uint8_t)(s_be_next_l ? 0u : 1u);   /* ★左右交替轮换 */
+        s_be_plain  = 0u;
+        s_be_fr     = 0u;
+        s_be_just   = 1u;
+        if (s_be_events < 60000u) s_be_events++;
+        (void)snprintf(_m, sizeof(_m),
+                       "BRANCH-EDGE #%u side=%s act=%u nb=%u w1=%u IG=%u OD=%ld",
+                       (unsigned)s_be_events, (s_be_side ? "L" : "R"),
+                       (unsigned)cnt, (unsigned)nblob, (unsigned)w1,
+                       (unsigned)ge_in_gourd, (long)odom_distance_mm());
+        telemetry_msg(_m);
+      }
+    }
+  }
+#endif /* USE_BRANCH_EDGE */
 
   /* ---- ★弯道计数：数"最右一路"(bit7)的【上升沿】次数（2026-09-22 他提的方案）----
      边沿计数 + 锁存间隔：一次持续点亮只算 1 次，且不会被 10ms 拍/速度绑死。
@@ -1692,6 +1799,13 @@ void line_follow_control(int16_t base)
 #if WIDE_LONG_GO_STRAIGHT
   if (wide_long) straight_override = 1u;
 #endif
+#if USE_BRANCH_EDGE
+  /* ★2026-10-08 分支口优先：进入"只跟一侧"之后，不再走"十字/宽图案 → 直行"那条。
+     为什么必须让路：分叉口的图案常常【两端都贴】→ 会被判成 on_cross → e=0 直行
+     → 车从两条分支中间穿过去，正是"过不去"的机制之一。
+     这里只清 straight_override，不动 on_cross 本身（别的逻辑还要用它）。 */
+  if (s_be_on) straight_override = 0u;
+#endif
   if (straight_override)
   {
     e = 0;
@@ -1707,6 +1821,20 @@ void line_follow_control(int16_t base)
   /* ---- PD 差速校正 ---- */
 #if USE_D_FILTER
   e = (int8_t)lpf_update(&d_lpf, (float)e);   /* 对误差低通, 压 D 项高频噪声 */
+#endif
+#if USE_BRANCH_EDGE
+  /* ★2026-10-08【分支口：误差只取"该侧最靠外的 N 路"】
+     位置：低通之后、D 项之前 = 它是本拍误差的最终来源。
+     为什么不放在低通之前：刚进分叉口那几拍会被 0.5 的滤波拖成"半个决心"，
+     而这正是要尽快咬住分支的时刻（低通本来是给 D 项压噪声的，不该管这个决策量）。
+     进入那一拍把 last_e 对齐 → d_term 从 0 起跳，避免阶跃又被 D 项放大一脚。 */
+  if (s_be_on)
+  {
+    int16_t es = line_error_side(r.raw, (uint8_t)BRANCH_EDGE_N,
+                                 (uint8_t)(s_be_side ? 0u : 1u));
+    e = (int8_t)(((int16_t)BRANCH_EDGE_SIGN) * es);
+    if (s_be_just) { s_be_just = 0u; last_e = e; }
+  }
 #endif
   int16_t d_term = (int16_t)(e - last_e);
   int16_t corr_pd = (int16_t)((kp_x10 * e) / 10 + (kd_x10 * d_term) / 10);
@@ -1932,6 +2060,9 @@ void line_follow_control(int16_t base)
     line_follow_dbg_set(e, corr, sp, (uint16_t)lost_cycles,
                         (uint8_t)((line_lost ? 1u : 0u) |
                                   (line_follow_in_gourd() ? 2u : 0u) |
+#if USE_BRANCH_EDGE
+                                  (s_be_on ? 8u : 0u) |
+#endif
                                   (s_wo_hold ? 4u : 0u)));
   }
 #endif
