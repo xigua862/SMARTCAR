@@ -387,6 +387,14 @@ static uint16_t start_blind = 0;
 /* ★2026-10-08（1008-R21）里程闸门的状态（依据/标定/风险见 app_config.h 的 GOURD_ARM_MM）*/
 static uint8_t s_gourd_armed = 0u;   /* 1 = 里程已越过阈值 ⇒ 启用葫芦圈那套逻辑 */
 #endif
+#if USE_GOURD_EXIT_ZONE
+/* ★2026-10-08（1008-R22）出圈"里程窗口+图案"判据⑤的状态 */
+static uint8_t  s_gourd_done = 0u;   /* 1 = 本次已出圈转过 ⇒ 葫芦圈逻辑全部关掉（里程闸门也跟着关）*/
+static uint16_t s_exit_log_n = 0u;   /* 已打印的 T-CAND 标定行数 */
+#if GOURD_EXIT_SLOW_EN
+static uint8_t  s_slow_req   = 0u;   /* 1 = 请求减速（减速区）*/
+#endif
+#endif
 
 void line_follow_control(int16_t base)
 {
@@ -400,7 +408,11 @@ void line_follow_control(int16_t base)
      为什么它能取代"进圈印记"：里程只增不减、不依赖图案与陀螺、越过了就永远越过
        ⇒ 不存在"错误状态被锁存下来"这种事（那正是 R20 咬人的地方）。
      放在函数最前面：下面的分支口块与出圈块都读它。 */
-  s_gourd_armed = (odom_distance_mm() >= (int32_t)GOURD_ARM_MM) ? 1u : 0u;
+  s_gourd_armed = ((odom_distance_mm() >= (int32_t)GOURD_ARM_MM)
+#if USE_GOURD_EXIT_ZONE
+                   && (s_gourd_done == 0u)      /* ★R22：出圈转过之后，整套葫芦圈逻辑一起关掉 */
+#endif
+                  ) ? 1u : 0u;
 #endif
 
 #if USE_GOURD_OPENLOOP
@@ -933,6 +945,14 @@ void line_follow_control(int16_t base)
   {
     sp = sp_curve;                    /* 误差大 = 弯道, 减速 */
   }
+#if (USE_GOURD_EXIT_ZONE && GOURD_EXIT_SLOW_EN)
+  /* ★R22【减速区】（本版默认关）：进入出口预备区后降速，让 T 形口有更多拍数可看、
+     也减少"识别到之后冲过路口"的距离。
+     为什么放在这里：必须在"速度自适应"之后覆盖，否则会被上面几条重新赋值。
+     ⚠️ 开启时注意：内轮命令 = sp − corr，降太多会被 WHEEL_PWM_FLOOR(20) 抬上去
+        ⇒ 差速被吃掉 ⇒ 出口前跑不圆。所以要温和（24 → 20），别一步到 12。 */
+  if (s_slow_req != 0u) { sp = (int16_t)GOURD_EXIT_SLOW_PWM; }
+#endif
   else if (!ge_in_gourd)
   {
     sp = sp_straight;                 /* 直道（★只在圈外才认直道） */
@@ -1311,6 +1331,13 @@ void line_follow_control(int16_t base)
     /* 冷却递减 */
     if (ge_cool > 0u) ge_cool--;
 
+#if (USE_GOURD_EXIT_ZONE && GOURD_EXIT_SLOW_EN)
+    /* ★R22【减速区请求】（本版默认关）：里程进入"窗口 − GOURD_EXIT_SLOW_MM"之后请求降速。
+       放在这一块是因为本块在【速度自适应之前】执行 ⇒ 本拍就能生效。 */
+    s_slow_req = ((s_gourd_armed != 0u) &&
+                  (odom_distance_mm() >= (int32_t)(GOURD_EXIT_WINDOW_MM - GOURD_EXIT_SLOW_MM))) ? 1u : 0u;
+#endif
+
     /* ★闸门 gate_ok 只被【图案判据①】消费 → 跟着 GOURD_EXIT_USE_PATTERN 走，
        否则关掉图案判据时会报 `#550-D: gate_ok was set but never used`。 */
 #if GOURD_EXIT_USE_PATTERN
@@ -1464,6 +1491,50 @@ void line_follow_control(int16_t base)
 #endif
         gourd_wrap_evt = 0u;          /* 消费掉，一次只转一次（关掉时也不留残值） */
       }
+
+#if USE_GOURD_EXIT_ZONE
+      /* ---- 判据⑤（1008-R22，用户方案）：里程窗口 + T 形图案 ----
+         几何见 app_config.h：出口是【T 形三岔】，线不会消失 ⇒ 必须靠"里程到了 + 看到 T"。
+         ★两个条件同时要：单用里程怕刻度漂；单用图案怕别处误命中。 */
+      if (trig_now == 0u)
+      {
+        int32_t  od_now = odom_distance_mm();
+        /* 当前拍位图 【或】 1kHz 窗口里最宽的那张位图（抓"一闪而过"的图案）*/
+        uint16_t pat    = (uint16_t)((uint16_t)r.raw | s_1k_maxraw);
+        uint8_t  in_win = (uint8_t)(((od_now >= (int32_t)(GOURD_EXIT_WINDOW_MM - GOURD_EXIT_WIN_HALF)) &&
+                                     (od_now <= (int32_t)(GOURD_EXIT_WINDOW_MM + GOURD_EXIT_WIN_HALF)))
+                                    ? 1u : 0u);
+        uint8_t  cand   = (uint8_t)(((pat & (uint16_t)GOURD_EXIT_PATTERN) != 0u) ? 1u : 0u);
+
+        /* ★标定日志：armed 之后每见一次候选图案就报一行（带里程、两个位图、是否在窗口内）。
+           这一趟跑完，从这些行就能定下"出口到底在多少里程""T 形图案到底是哪个位图"。 */
+        if ((s_gourd_armed != 0u) && (cand != 0u) && (s_exit_log_n < (uint16_t)GOURD_EXIT_LOG_MAX))
+        {
+          char _m[128];
+          s_exit_log_n++;
+          (void)snprintf(_m, sizeof(_m),
+                         "T-CAND #%u OD=%ld raw=%02X 1kraw=%04X mx=%u inwin=%u win=%ld",
+                         (unsigned)s_exit_log_n, (long)od_now,
+                         (unsigned)(r.raw & 0xFFu), (unsigned)s_1k_maxraw,
+                         (unsigned)s_1k_maxact, (unsigned)in_win,
+                         (long)(int32_t)GOURD_EXIT_WINDOW_MM);
+          telemetry_msg(_m);
+        }
+
+        if ((s_gourd_armed != 0u) && (in_win != 0u) && (cand != 0u))
+        {
+          trig_now = 5u;
+        }
+#if (GOURD_EXIT_DEADLINE_MM > 0)
+        /* 兜底（本版默认关）：线再怎么不出现 T 图案，里程过了窗口+余量也强制右转 */
+        if ((trig_now == 0u) && (s_gourd_armed != 0u) &&
+            (od_now >= (int32_t)(GOURD_EXIT_WINDOW_MM + GOURD_EXIT_DEADLINE_MM)))
+        {
+          trig_now = 5u;
+        }
+#endif
+      }
+#endif
 #endif
 
     }
@@ -1482,6 +1553,9 @@ void line_follow_control(int16_t base)
       ge_turn_frames = 0u;
 #if GOURD_EXIT_ONE_SHOT
       ge_fired = 1u;                                /* ★上锁：本次进圈不再转第二次 */
+#endif
+#if USE_GOURD_EXIT_ZONE
+      s_gourd_done = 1u;                            /* ★R22：出圈已起转 ⇒ 关掉整套葫芦圈逻辑 */
 #endif
       if (yaw_ok) { imu_yaw_reset(); }              /* 以起转时刻为 0°，之后读到的是转了多少 */
       if (ge_events < 60000u) ge_events++;
