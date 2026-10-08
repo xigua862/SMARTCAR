@@ -408,6 +408,25 @@ static uint8_t  s_slow_req   = 0u;   /* 1 = 请求减速（减速区）*/
 #endif
 #endif
 
+#if (USE_BRANCH_EDGE && (BRANCH_EDGE_LOG_MAX > 0))
+/* ★★★ 2026-10-08（1008-R24）【分支口触发的 RAM 台账】—— 只记录，不改控制 ★★★
+ *  为什么必须记：R23 那趟实车"卡在第三个圈"，计数器显示 **BRANCH-EDGE 触发 6 次**
+ *    （真切点只有 3 个）⇒ 多出来的那几次把"左右交替"的相位翻乱了 ⇒ 某个切点选边全反。
+ *    但 `s_be_events` 只给【次数】，不给【位置】⇒ 没法判断哪几次是真的、该在哪里加约束。
+ *  ⇒ 把每次触发都记下来（里程 + 选边 + 图案特征，每条 8 字节，最多 BRANCH_EDGE_LOG_MAX 条），
+ *    我用 DAPLink 读芯片取，跟"里程闸门"一样：先量清楚，再决定怎么切。
+ *  ★只写不读会被 ARMCC 报 #550-D ⇒ 另配 line_follow_belog_get() 读出口。 */
+typedef struct {
+  int32_t od;     /* 触发时的里程（起点起算）*/
+  uint8_t side;   /* 选的是哪一侧（1 = 左）*/
+  uint8_t act;    /* 亮了几路 */
+  uint8_t nb;     /* 几个团 */
+  uint8_t w1;     /* 是否"只有一端被顶住" */
+} belog_t;
+static belog_t  s_be_log[BRANCH_EDGE_LOG_MAX];
+static uint16_t s_be_log_n = 0u;
+#endif
+
 void line_follow_control(int16_t base)
 {
   line_reading_t r = line_read();
@@ -789,6 +808,18 @@ void line_follow_control(int16_t base)
         s_be_fr     = 0u;
         s_be_just   = 1u;
         if (s_be_events < 60000u) s_be_events++;
+#if (BRANCH_EDGE_LOG_MAX > 0)
+        /* ★R24：把这次触发记进 RAM（里程/选边/图案特征）—— 见文件上方 s_be_log 的说明 */
+        if (s_be_log_n < (uint16_t)BRANCH_EDGE_LOG_MAX)
+        {
+          s_be_log[s_be_log_n].od   = odom_distance_mm();
+          s_be_log[s_be_log_n].side = s_be_side;
+          s_be_log[s_be_log_n].act  = cnt;
+          s_be_log[s_be_log_n].nb   = nblob;
+          s_be_log[s_be_log_n].w1   = w1;
+          s_be_log_n++;
+        }
+#endif
         (void)snprintf(_m, sizeof(_m),
                        "BRANCH-EDGE #%u side=%s act=%u nb=%u w1=%u IG=%u E=%d OD=%ld",
                        (unsigned)s_be_events, (s_be_side ? "L" : "R"),
@@ -2945,6 +2976,22 @@ uint8_t line_follow_gourd_waves(void)
      >0 就说明有东西一闪而过 —— 现在这个数据不只是观测，
      它背后的 maxraw 位图已经真的参与相切点识别了。
      ★由 line_follow_control 里的相切点识别处填充（那里调 line_1k_take 取走窗口）。 */
+#if (USE_BRANCH_EDGE && (BRANCH_EDGE_LOG_MAX > 0))
+/* ★R24：把分支口触发台账读出去（返回 0 = 该下标无记录）。
+   没有它，s_be_log 就是"只写不读"⇒ ARMCC #550-D（本项目要求 0 警告）。 */
+uint8_t line_follow_belog_get(uint16_t i, int32_t *od, uint8_t *side, uint8_t *act,
+                              uint8_t *nb, uint8_t *w1)
+{
+  if ((i >= (uint16_t)BRANCH_EDGE_LOG_MAX) || (i >= s_be_log_n)) return 0u;
+  if (od   != 0) { *od   = s_be_log[i].od;   }
+  if (side != 0) { *side = s_be_log[i].side; }
+  if (act  != 0) { *act  = s_be_log[i].act;  }
+  if (nb   != 0) { *nb   = s_be_log[i].nb;   }
+  if (w1   != 0) { *w1   = s_be_log[i].w1;   }
+  return 1u;
+}
+#endif
+
 uint16_t line_follow_1k_missed(void)
 {
   return s_1k_missed;
