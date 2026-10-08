@@ -2160,21 +2160,39 @@ void line_follow_control(int16_t base)
 #endif
 
 #if WHEEL_NO_STOP_BRAKE
-    /* ★★★ 2026-10-08（1008-R9）【不许把轮子停住/反转】—— 从 fw-0926-G88 移植 ★★★
-       依据、机制与实车证据见 app_config.h 的 WHEEL_NO_STOP_BRAKE 长注释。一句话：
-       弯道里"内轮被速度环压停 → 车绕着它打转"就是"左右晃/兜圈"的根；
-       只要这拍有本意（两轮不全是 0 = 不是停车），任何一轮都不许被压到 +MIN_ROLL 以下
-       —— 想刹车/后退也【保持正转】，这样就不会出现"原地锁死"。
-       ★顺序放在下限之后：下限管 8~20 这段，这里兜住 ≤18 与所有负值。 */
-    if ((i1 != 0) || (i2 != 0))
+    /* ★★★ 2026-10-08（1008-R9 → R10）【不许把轮子停住/反转】★★★
+       R9（硬 +18）的实车后果：弯道好了，但【葫芦圈过不了了】。
+       原因：R9 是 G88 的"最狠"版本 —— 连【本意就是倒转/刹车】的轮子也被抬成 +18。
+         而"本意倒转"恰恰是【刻意原地转向】的正常手段（BRANCH-EDGE 分支口、
+         大修正急转都靠它）。G88 的作者当时没有 BRANCH-EDGE 这个模式，
+         所以他那句"不受影响：出圈右转/丢线旋转都在别的路径上"在我们这儿不成立。
+       证据（算一下就知道差多少）：sp=24、corr=±30（分支口那一下）时
+         本意 m1 = 24-30 = -6 → R9 抬成 +18，差速从 60 掉到 36（少 40%）。
+       R10 改成【跟着本意走】（= G88 那条线里 WHEEL_FLOOR_BY_INTENT 的做法）：
+         本意 > 0（要它往前）→ 输出至少 +MIN_ROLL（不许被速度环刹到 0/反转）
+         本意 < 0（刻意倒转）  → 输出至多 -MIN_ROLL（不许被压成 0，但方向保留）
+         本意 = 0（本来就要停）→ 不动作（保住停车/急停语义）
+       ⇒ 既消掉"本意前进却被压停"（G80 的病根），又不砍掉刻意的原地转向权限。 */
+    if (i1 > 0)
     {
       if (m1 < (int16_t)WHEEL_MIN_ROLL) { m1 = (int16_t)WHEEL_MIN_ROLL; if (s_unstop_cnt < 60000u) s_unstop_cnt++; }
+    }
+    else if (i1 < 0)
+    {
+      if (m1 > -(int16_t)WHEEL_MIN_ROLL) { m1 = -(int16_t)WHEEL_MIN_ROLL; if (s_unstop_cnt < 60000u) s_unstop_cnt++; }
+    }
+    if (i2 > 0)
+    {
       if (m2 < (int16_t)WHEEL_MIN_ROLL) { m2 = (int16_t)WHEEL_MIN_ROLL; if (s_unstop_cnt < 60000u) s_unstop_cnt++; }
+    }
+    else if (i2 < 0)
+    {
+      if (m2 > -(int16_t)WHEEL_MIN_ROLL) { m2 = -(int16_t)WHEEL_MIN_ROLL; if (s_unstop_cnt < 60000u) s_unstop_cnt++; }
     }
     if ((s_unstop_cnt != 0u) && (s_unstop_rep == 0u))
     {
       s_unstop_rep = 1u;
-      telemetry_msg("NO-STOP-BRAKE: active (wheel clamped to MIN_ROLL)");
+      telemetry_msg("NO-STOP-BRAKE: active (clamped by intent)");
     }
 #endif
     /* ★★★ 2026-09-26 晚【把控制器的"决策"记进黑匣子】★★★
