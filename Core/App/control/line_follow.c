@@ -1295,6 +1295,15 @@ void line_follow_control(int16_t base)
 #if (GOURD_EXIT_GATE_WAVES > 0)
     if (gourd_waves < (uint8_t)GOURD_EXIT_GATE_WAVES) gate_ok = 0u;
 #endif
+#if ((GOURD_EXIT_GATE_BE > 0) && USE_BRANCH_EDGE)
+    /* ★2026-10-08（1008-R16）新闸门：要求【已经跨过 >=N 个切点】（= BRANCH-EDGE 触发次数）。
+       为什么用它：GATE_WAVES 用的 gourd_waves 实测恒为 0（陀螺那条判据零产出）⇒
+         设了等于永不放行；而 0924 那次"图案出圈"之所以失败，正是因为没有
+         "绕过几圈"这个信号来挡住"左直角弯出口"的同图案误触发。
+       s_be_events 就是那个信号（实测：成功那趟 3 次、失败那趟 5 次；一圈正好 3 个切点）
+       ⇒ "没绕完不放行"，从机制上堵掉"走两步就右转打死脱线"。 */
+    if (s_be_events < (uint16_t)GOURD_EXIT_GATE_BE) gate_ok = 0u;
+#endif
 #if GOURD_EXIT_REQUIRE_ENTRY
     /* 只有进过圈才允许出圈转向（右直角弯入口的图案和出圈一样，靠这个挡住） */
     if (!ge_in_gourd) gate_ok = 0u;
