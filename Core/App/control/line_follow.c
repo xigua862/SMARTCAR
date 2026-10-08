@@ -183,6 +183,11 @@ static uint8_t  s_fb_dead[2]     = {0, 0};   /* 1 = 该轮测速判为断线 →
 static uint8_t  s_fb_dead_rep[2] = {0, 0};   /* 打印状态：0=未知 1=已报DEAD 2=已报OK */
 static uint16_t s_fb_move        = 0;        /* "车在动"锁存的剩余拍数（任一测速>=MOVE 就续期）*/
 #endif
+#if WHEEL_NO_STOP_BRAKE
+/* ★2026-10-08（1008-R9）"不许把轮子停住/反转"的统计与一次性提示 */
+static uint16_t s_unstop_cnt = 0;   /* 触发过多少拍（累计，只增）*/
+static uint8_t  s_unstop_rep = 0;   /* 是否已打印过一次提示（避免刷屏）*/
+#endif
 static float  tgt_rpm[2] = {0, 0};
 #endif
 
@@ -1993,6 +1998,12 @@ void line_follow_control(int16_t base)
   if (m1 < -99) m1 = -99;
   if (m2 >  99) m2 =  99;
   if (m2 < -99) m2 = -99;
+#if WHEEL_NO_STOP_BRAKE
+  /* ★2026-10-08（1008-R9）把"本意"先存下来：下面速度环会把 m1/m2 覆盖成最终输出，
+     而"不许停住/反转"要看的正是【本意】（G88 用的是同一对变量 i1/i2）。 */
+  const int16_t i1 = m1;
+  const int16_t i2 = m2;
+#endif
 
 #if USE_SPEED_LOOP
   /* ★2026-09-23 修一个会让车"像爬一样"的 bug：目标必须换算成【真正的 RPM】再交给 PID。
@@ -2146,6 +2157,25 @@ void line_follow_control(int16_t base)
     if (m1 < -WHEEL_FLOOR_MIN_CMD && m1 > -(int16_t)WHEEL_PWM_FLOOR) m1 = -(int16_t)WHEEL_PWM_FLOOR;
     if (m2 > WHEEL_FLOOR_MIN_CMD  && m2 < (int16_t)WHEEL_PWM_FLOOR) m2 = (int16_t)WHEEL_PWM_FLOOR;
     if (m2 < -WHEEL_FLOOR_MIN_CMD && m2 > -(int16_t)WHEEL_PWM_FLOOR) m2 = -(int16_t)WHEEL_PWM_FLOOR;
+#endif
+
+#if WHEEL_NO_STOP_BRAKE
+    /* ★★★ 2026-10-08（1008-R9）【不许把轮子停住/反转】—— 从 fw-0926-G88 移植 ★★★
+       依据、机制与实车证据见 app_config.h 的 WHEEL_NO_STOP_BRAKE 长注释。一句话：
+       弯道里"内轮被速度环压停 → 车绕着它打转"就是"左右晃/兜圈"的根；
+       只要这拍有本意（两轮不全是 0 = 不是停车），任何一轮都不许被压到 +MIN_ROLL 以下
+       —— 想刹车/后退也【保持正转】，这样就不会出现"原地锁死"。
+       ★顺序放在下限之后：下限管 8~20 这段，这里兜住 ≤18 与所有负值。 */
+    if ((i1 != 0) || (i2 != 0))
+    {
+      if (m1 < (int16_t)WHEEL_MIN_ROLL) { m1 = (int16_t)WHEEL_MIN_ROLL; if (s_unstop_cnt < 60000u) s_unstop_cnt++; }
+      if (m2 < (int16_t)WHEEL_MIN_ROLL) { m2 = (int16_t)WHEEL_MIN_ROLL; if (s_unstop_cnt < 60000u) s_unstop_cnt++; }
+    }
+    if ((s_unstop_cnt != 0u) && (s_unstop_rep == 0u))
+    {
+      s_unstop_rep = 1u;
+      telemetry_msg("NO-STOP-BRAKE: active (wheel clamped to MIN_ROLL)");
+    }
 #endif
     /* ★★★ 2026-09-26 晚【把控制器的"决策"记进黑匣子】★★★
        为什么必须加：黑匣子原来只记 IR/RPM/PWM/GZ —— 那些是【结果】。
