@@ -60,6 +60,8 @@ static uint8_t  s_be_plain  = 0;   /* 连续"普通线"拍数（退出判据）*
 static uint8_t  s_be_fr     = 0;   /* 本次已保持拍数（兜底上限）*/
 static uint8_t  s_be_just   = 0;   /* 本拍刚进入（用于对齐 last_e，避免 D 项踢一脚）*/
 static uint16_t s_be_events = 0;   /* 触发次数（日志用）*/
+static uint8_t  s_be_conf   = 0;   /* ★R8：连续满足触发判据的拍数（防单拍毛刺）*/
+static int32_t  s_be_od     = 0;   /* ★R8：上一次触发时的里程（防成簇误报）*/
 #endif
 #if GOURD_ARC_FLIP
 static int32_t  s_arc_mdeg  = 0;   /* ★同号偏航累计（毫度）—— 绕圈/相切点检测 */
@@ -708,7 +710,24 @@ void line_follow_control(int16_t base)
       if ((gate != 0u) && (cnt >= (uint8_t)BRANCH_EDGE_MIN_ACT) &&
           (cnt <= (uint8_t)CROSS_ACTIVE_MAX) && ((w1 != 0u) || (nblob >= 2u)))
       {
+        if (s_be_conf < 255u) s_be_conf++;
+      }
+      else
+      {
+        s_be_conf = 0u;
+      }
+
+      /* ★2026-10-08（1008-R8）【两道防抖，治"有时过有时不过"】——见 app_config.h 说明。
+         ① 连续 BRANCH_EDGE_CONFIRM 拍满足（防单拍毛刺）；
+         ② 与上次触发至少隔 BRANCH_EDGE_MIN_MM 里程（防成簇误报）。
+         ★为什么这两道是必须的：本功能的"左右交替"是计数式的、没有反馈 ——
+           多触发一次或少触发一次，后面所有相切点的分支都会反过来。 */
+      if ((s_be_conf >= (uint8_t)BRANCH_EDGE_CONFIRM) &&
+          ((odom_distance_mm() - s_be_od) >= (int32_t)BRANCH_EDGE_MIN_MM))
+      {
         char _m[96];
+        s_be_conf   = 0u;
+        s_be_od     = odom_distance_mm();
         s_be_on     = 1u;
         s_be_side   = s_be_next_l;                        /* 1 = 左, 0 = 右 */
         s_be_next_l = (uint8_t)(s_be_next_l ? 0u : 1u);   /* ★左右交替轮换 */
@@ -717,10 +736,11 @@ void line_follow_control(int16_t base)
         s_be_just   = 1u;
         if (s_be_events < 60000u) s_be_events++;
         (void)snprintf(_m, sizeof(_m),
-                       "BRANCH-EDGE #%u side=%s act=%u nb=%u w1=%u IG=%u OD=%ld",
+                       "BRANCH-EDGE #%u side=%s act=%u nb=%u w1=%u IG=%u E=%d OD=%ld",
                        (unsigned)s_be_events, (s_be_side ? "L" : "R"),
                        (unsigned)cnt, (unsigned)nblob, (unsigned)w1,
-                       (unsigned)ge_in_gourd, (long)odom_distance_mm());
+                       (unsigned)ge_in_gourd, (int)last_error,
+                       (long)odom_distance_mm());
         telemetry_msg(_m);
       }
     }
