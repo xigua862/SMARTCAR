@@ -231,7 +231,14 @@ void telemetry_trace_tick(void)
     (void)de0; (void)dc0; (void)ds0; (void)df0;
     if (dcy0 > (uint16_t)LOST_SPIN_DELAY)
     {
-      if (s_lost_seen < 255u) s_lost_seen++;
+      /* ★2026-10-08（1008-R19）再加一条：只有【在葫芦圈里】的丢线才算"出事"。
+         为什么：R15 只看 dc ⇒ 上一趟在 OD≈1100（圈外、被分支口误触发甩出线）就冻结了，
+         缓冲区只覆盖了前 1.1 米，而用户报的故障（第 2 个圈绕圈）在那之后 ⇒ 还是看不到。
+         圈外那些"丢线→找线"是正常恢复动作，不该占据黑匣子。 */
+      if (line_follow_in_gourd())
+      {
+        if (s_lost_seen < 255u) s_lost_seen++;
+      }
     }
     if (s_lost_seen >= 2u) return;           /* 第一次真丢线 → 冻住，保住出事前 5.5 秒 */
   }
