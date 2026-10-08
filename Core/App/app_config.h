@@ -1809,9 +1809,10 @@
 #define GOURD_EXIT_PATTERN     0x0003u  /* ★占位值（待标定）：T 形候选 = 只有最左 2 路亮 */
 #define GOURD_EXIT_LOG_MAX     24       /* 标定用：RAM 里最多存几条候选记录 */
 #define GOURD_EXIT_DEADLINE_MM 0        /* 兜底：里程 ≥ 窗口+此值时无条件右转。0 = 关（本版）*/
-#define GOURD_EXIT_SLOW_EN     0        /* 减速区：本版关（下一轮单独开，见上面的提醒）*/
-#define GOURD_EXIT_SLOW_PWM    20       /* 减速后的速度基准（温和：24 → 20）*/
-#define GOURD_EXIT_SLOW_MM     800      /* 提前多少 mm 开始减速 */
+#define GOURD_EXIT_SLOW_EN     1        /* ★R29：打开（用户要求"接近葫芦圈时降速约 20%"）*/
+#define GOURD_EXIT_SLOW_PWM    20       /* 减速后的速度基准：24 → 20（降 17%，即用户说的"降个 80%"）*/
+#define GOURD_EXIT_SLOW_MM     800      /* 保留：旧算法用，现已不参与（减速起点改用下面的 GOURD_SLOW_FROM_MM）*/
+#define GOURD_SLOW_FROM_MM     10679    /* ★R29b：减速起点 = 【用户实车标定的那个里程数】10679mm（他发车到"干扰结束处"停下的读数）。不是闸门值 10700，也不是"过了直角弯"这种描述。*/      /* 提前多少 mm 开始减速 */
 #define BRANCH_EDGE_SIGN        1     /* ★方向符号（±1）：行为反了就改 -1 */
 
 /* ★★ 2026-10-08（1008-R8）【两道防抖 —— 治"有时过有时不过"】★★

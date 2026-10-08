@@ -1388,7 +1388,7 @@ void line_follow_control(int16_t base)
     /* ★R22【减速区请求】（本版默认关）：里程进入"窗口 − GOURD_EXIT_SLOW_MM"之后请求降速。
        放在这一块是因为本块在【速度自适应之前】执行 ⇒ 本拍就能生效。 */
     s_slow_req = ((s_gourd_armed != 0u) &&
-                  (odom_distance_mm() >= (int32_t)(GOURD_EXIT_WINDOW_MM - GOURD_EXIT_SLOW_MM))) ? 1u : 0u;
+                  (odom_distance_mm() >= (int32_t)GOURD_SLOW_FROM_MM)) ? 1u : 0u;
 #endif
 
     /* ★闸门 gate_ok 只被【图案判据①】消费 → 跟着 GOURD_EXIT_USE_PATTERN 走，
