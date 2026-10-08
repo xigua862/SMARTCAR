@@ -187,6 +187,13 @@ static uint16_t s_fb_move        = 0;        /* "车在动"锁存的剩余拍数
 /* ★2026-10-08（1008-R9）"不许把轮子停住/反转"的统计与一次性提示 */
 static uint16_t s_unstop_cnt = 0;   /* 触发过多少拍（累计，只增）*/
 static uint8_t  s_unstop_rep = 0;   /* 是否已打印过一次提示（避免刷屏）*/
+#if (WHEEL_REV_MAX_FRAMES > 0)
+/* ★2026-10-08（1008-R17）"倒转限时"的状态（依据见 app_config.h 的长注释）*/
+static uint8_t  s_rev_cnt[2]   = {0u, 0u};   /* 该轮连续"被命令倒转"的拍数 */
+static uint8_t  s_rev_latch[2] = {0u, 0u};   /* 1 = 判定"圆上稳态倒转" → 强制正转 */
+static uint16_t s_rev_cut      = 0u;         /* 打断过几次（诊断用）*/
+static uint8_t  s_rev_rep      = 0u;         /* 是否已打印过提示 */
+#endif
 #endif
 static float  tgt_rpm[2] = {0, 0};
 #endif
@@ -2203,6 +2210,53 @@ void line_follow_control(int16_t base)
       s_unstop_rep = 1u;
       telemetry_msg("NO-STOP-BRAKE: active (clamped by intent)");
     }
+
+#if (WHEEL_REV_MAX_FRAMES > 0)
+    /* ★★★ 2026-10-08（1008-R17）【倒转限时：允许猛转，不许长期倒转】★★★
+       依据与实车数据见 app_config.h 的 WHEEL_REV_MAX_FRAMES 长注释。一句话：
+         圈上转弯会让内轮被命令倒转（trim 把差速放大 ~40%，总差速超过 sp=24 时内轮必然反转），
+         而"一直倒转"= 车绕着被刹住的内轮原地打转 ⇒ 卡在圈上（实测稳态 PWM=-18/54、
+         IR=01100000、e=-8、cor=-30、净里程不再增长）。
+       所以：连续倒转超过 WHEEL_REV_MAX_FRAMES 拍 ⇒ 强制抬回 +WHEEL_MIN_ROLL 并锁住，
+         直到该轮本意转正为止。切点那 3~5 拍的猛转不受影响（<15 拍）。 */
+    {
+      uint8_t w;
+      for (w = 0u; w < 2u; w++)
+      {
+        int16_t intent = (w == 0u) ? i1 : i2;
+        int16_t *out    = (w == 0u) ? &m1 : &m2;
+
+        if (intent < 0)
+        {
+          if (*out < (int16_t)WHEEL_MIN_ROLL)          /* 确实在被命令"停/倒" */
+          {
+            if (s_rev_cnt[w] < 255u) s_rev_cnt[w]++;
+            if (s_rev_cnt[w] > (uint8_t)WHEEL_REV_MAX_FRAMES) s_rev_latch[w] = 1u;
+          }
+          else
+          {
+            s_rev_cnt[w] = 0u;
+          }
+        }
+        else
+        {
+          s_rev_cnt[w]   = 0u;                          /* 本意转正 → 解锁，允许下一次猛转 */
+          s_rev_latch[w] = 0u;
+        }
+
+        if ((s_rev_latch[w] != 0u) && (*out < (int16_t)WHEEL_MIN_ROLL))
+        {
+          *out = (int16_t)WHEEL_MIN_ROLL;               /* 打断"长期倒转" → 保持滚动 */
+          if (s_rev_cut < 60000u) s_rev_cut++;
+        }
+      }
+      if ((s_rev_cut != 0u) && (s_rev_rep == 0u))
+      {
+        s_rev_rep = 1u;
+        telemetry_msg("REV-CUT: active (long reverse clamped to MIN_ROLL)");
+      }
+    }
+#endif
 #endif
     /* ★★★ 2026-09-26 晚【把控制器的"决策"记进黑匣子】★★★
        为什么必须加：黑匣子原来只记 IR/RPM/PWM/GZ —— 那些是【结果】。
