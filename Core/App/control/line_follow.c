@@ -778,6 +778,13 @@ void line_follow_control(int16_t base)
       uint8_t tL = (uint8_t)((L == 0u) ? 1u : 0u);
       uint8_t tR = (uint8_t)((R == (uint8_t)(LINE_CHANNELS - 1u)) ? 1u : 0u);
       uint8_t w1 = (uint8_t)((tL != tR) ? 1u : 0u);
+      /* ★★★ 2026-10-08（1008-R34）【把"两坨"状态改成每拍更新】★★★
+         病根（台账实测 L,R,R,R）：R30 的上升沿检测里，s_be_twoblob_prev 只在
+         【触发被接受】时才更新，而两个切点之间这个块不运行 ⇒ prev 永远停在 1
+         ⇒ 之后每次都判成"没有上升沿" ⇒ 相位再也不翻 ⇒ 第三个切点起全选错边。
+         改成在【每拍都执行到的地方】（nblob 刚算完）更新，历史才是真的历史。 */
+      s_be_twoblob_prev = s_be_twoblob;
+      s_be_twoblob      = (uint8_t)((nblob >= 2u) ? 1u : 0u);
 #if USE_GOURD_ODOM_ARM
       /* ★R21：闸门改用【里程】（用户方案）—— 只在越过 GOURD_ARM_MM 之后才允许接管 */
       uint8_t gate = s_gourd_armed;
@@ -824,12 +831,12 @@ void line_follow_control(int16_t base)
            （图案闪烁、250mm 间距之外又满足一次）⇒ 相位被多翻 ⇒ 后面所有圆选错边。
            改成：只在"上一拍没看到两坨 → 这一拍看到了"的跳变沿上翻一次。
            ⇒ 一个切点无论被接受几次，相位只前进一格。 */
-        s_be_twoblob = (uint8_t)((nblob >= 2u) ? 1u : 0u);
+        /* R34: 这两行已上移到 nblob 计算之后（每拍更新）*/
         if ((s_be_twoblob != 0u) && (s_be_twoblob_prev == 0u))
         {
           s_be_next_l = (uint8_t)(s_be_next_l ? 0u : 1u);   /* 只在跳变沿上翻 */
         }
-        s_be_twoblob_prev = s_be_twoblob;
+        /* R34: 这两行已上移到 nblob 计算之后（每拍更新）*/
         s_be_plain  = 0u;
         s_be_fr     = 0u;
         s_be_just   = 1u;
