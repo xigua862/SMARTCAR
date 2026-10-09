@@ -336,7 +336,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32F103xB</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Core/App;../Drivers/STM32F1xx_HAL_Driver/Inc;../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F1xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM3</IncludePath>
+              <IncludePath>../Core/Inc;../Core/App;../Core/App/v2/drv;../Core/App/v2/mid;../Core/App/v2/ctl;../Core/App/v2/app;../Drivers/STM32F1xx_HAL_Driver/Inc;../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F1xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM3</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -569,6 +569,136 @@
               <FileName>car_fsm.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/App/fsm/car_fsm.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>AppV2/Drv</GroupName>
+          <Files>
+            <File>
+              <FileName>v2_line_sensor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/drv/v2_line_sensor.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_motor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/drv/v2_motor.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_encoder.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/drv/v2_encoder.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_odom.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/drv/v2_odom.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_imu.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/drv/v2_imu.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_pose.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/drv/v2_pose.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_buzzer.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/drv/v2_buzzer.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_led.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/drv/v2_led.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_key.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/drv/v2_key.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_uart.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/drv/v2_uart.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>AppV2/Mid</GroupName>
+          <Files>
+            <File>
+              <FileName>v2_track.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/mid/v2_track.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>AppV2/Ctl</GroupName>
+          <Files>
+            <File>
+              <FileName>v2_pid.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/ctl/v2_pid.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_filter.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/ctl/v2_filter.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_speeds.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/ctl/v2_speeds.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_angulate.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/ctl/v2_angulate.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_steering.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/ctl/v2_steering.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>AppV2/App</GroupName>
+          <Files>
+            <File>
+              <FileName>v2_app_task.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/app/v2_app_task.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_telemetry.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/app/v2_telemetry.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_tune.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/app/v2_tune.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_car_fsm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/app/v2_car_fsm.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_param.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/app/v2_param.c</FilePath>
+            </File>
+            <File>
+              <FileName>v2_selftest.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/v2/app/v2_selftest.c</FilePath>
             </File>
           </Files>
         </Group>

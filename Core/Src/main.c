@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "app.h"
 #include "i2c.h"      /* ★必须放 USER CODE 区: 否则 CubeMX 重新生成会把 app_init/app_loop 的声明冲掉 */
+#include "v2_app_task.h"  /* ★V2-M0: 重写版应用入口（旧 app_init/app_loop 已停用，见下） */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -98,7 +99,15 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   MX_I2C2_Init();   /* ★手写的 I2C2(MPU6050), 放 USER CODE 区防被冲 */
-  app_init();        /* 应用框架初始化(电机/循迹/测速/IMU/FSM/遥测) */
+  /* ==========================================================================
+   * ★★★ V2-M0（2026-10-09）：从零重写版入口 —— 旧 app_init/app_loop 停用
+   *   旧树文件全部保留并照常编译（回退点 = 把下面 #if 1 改回 #if 0 即可），
+   *   但主循环与初始化只走 v2_*。理由与框架：文档/框架定稿-v1.md
+   * ==========================================================================*/
+#if 0
+  app_init();        /* 旧版：应用框架初始化(电机/循迹/测速/IMU/FSM/遥测) */
+#endif
+  v2_app_init();     /* V2：驱动层 + 1kHz TIM1 节拍 + 遥测/命令 */
 
   /* USER CODE END 2 */
 
@@ -135,7 +144,10 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    app_loop();      /* 非阻塞调度: 循迹 + 测速打印 + 串口命令 */
+#if 0
+    app_loop();      /* 旧版: 非阻塞调度: 循迹 + 测速打印 + 串口命令 */
+#endif
+    v2_app_loop();   /* V2: 串口轮询 + 100Hz 人机/IMU + 10Hz CSV（1kHz 在 TIM1 中断里） */
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
