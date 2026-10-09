@@ -427,6 +427,12 @@ static belog_t  s_be_log[BRANCH_EDGE_LOG_MAX];
 static uint16_t s_be_log_n = 0u;
 #endif
 
+#if USE_BRANCH_EDGE
+/* ★R30：分支口相位翻转用的"两坨图案"边沿检测状态 */
+static uint8_t s_be_twoblob      = 0u;   /* 本拍是否看到两坨（团数 >= 2）*/
+static uint8_t s_be_twoblob_prev = 0u;   /* 上一拍 */
+#endif
+
 void line_follow_control(int16_t base)
 {
   line_reading_t r = line_read();
@@ -813,7 +819,17 @@ void line_follow_control(int16_t base)
         s_be_od     = odom_distance_mm();
         s_be_on     = 1u;
         s_be_side   = s_be_next_l;                        /* 1 = 左, 0 = 右 */
-        s_be_next_l = (uint8_t)(s_be_next_l ? 0u : 1u);   /* ★左右交替轮换 */
+        /* ★★★ 2026-10-08（1008-R30）【相位翻转改成"边沿触发"——用户方案】★★★
+           原来是"每次接受一次触发就翻一次"。问题：同一次切点可能被接受两次
+           （图案闪烁、250mm 间距之外又满足一次）⇒ 相位被多翻 ⇒ 后面所有圆选错边。
+           改成：只在"上一拍没看到两坨 → 这一拍看到了"的跳变沿上翻一次。
+           ⇒ 一个切点无论被接受几次，相位只前进一格。 */
+        s_be_twoblob = (uint8_t)((nblob >= 2u) ? 1u : 0u);
+        if ((s_be_twoblob != 0u) && (s_be_twoblob_prev == 0u))
+        {
+          s_be_next_l = (uint8_t)(s_be_next_l ? 0u : 1u);   /* 只在跳变沿上翻 */
+        }
+        s_be_twoblob_prev = s_be_twoblob;
         s_be_plain  = 0u;
         s_be_fr     = 0u;
         s_be_just   = 1u;
