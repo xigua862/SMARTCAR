@@ -2057,7 +2057,15 @@ void line_follow_control(int16_t base)
   }
 #endif
   int16_t d_term = (int16_t)(e - last_e);
-  int16_t corr_pd = (int16_t)((kp_x10 * e) / 10 + (kd_x10 * d_term) / 10);
+  /* ★★★ 2026-10-08（1008-R31）【葫芦圈内降低 KP】—— 用户要求 ★★★
+     现象：圈上左右晃幅度太大，影响过切点（晃大了图案就更不容易满足"两坨"判据）。
+     做法：只在【里程闸门打开后】把 KP 换成 GOURD_KP，其余一律用原 KP；KD 与任何其他开关都不动。
+     ★回退：GOURD_KP 改成和 KP 一样的值，或 USE_GOURD_ODOM_ARM 设 0。 */
+  int16_t kp_x10_eff = kp_x10;
+#if USE_GOURD_ODOM_ARM
+  if (s_gourd_armed != 0u) { kp_x10_eff = (int16_t)(GOURD_KP * 10.0f); }
+#endif
+  int16_t corr_pd = (int16_t)((kp_x10_eff * e) / 10 + (kd_x10 * d_term) / 10);
   last_e = e;
 
 #if USE_CORR_TRIM
