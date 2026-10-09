@@ -1810,7 +1810,7 @@
 #define GOURD_EXIT_PATTERN     0x0003u  /* ★占位值（待标定）：T 形候选 = 只有最左 2 路亮 */
 #define GOURD_EXIT_LOG_MAX     24       /* 标定用：RAM 里最多存几条候选记录 */
 #define GOURD_EXIT_DEADLINE_MM 0        /* 兜底：里程 ≥ 窗口+此值时无条件右转。0 = 关（本版）*/
-#define GOURD_EXIT_SLOW_EN     1        /* ★R29：打开（用户要求"接近葫芦圈时降速约 20%"）*/
+#define GOURD_EXIT_SLOW_EN     0        /* ★R35：关掉（用户要求"先关减速看看车速是不是它拖的"）。R29 的实现有缺陷：里程过 10679 之后【整趟剩下的路】都用 20 ⇒ 只要赛道后半段在 10.7 米之后，车就一直慢。等确认完再按"只在葫芦圈那一段"重开。 */
 #define GOURD_EXIT_SLOW_PWM    20       /* 减速后的速度基准：24 → 20（降 17%，即用户说的"降个 80%"）*/
 #define GOURD_EXIT_SLOW_MM     800      /* 保留：旧算法用，现已不参与（减速起点改用下面的 GOURD_SLOW_FROM_MM）*/
 #define GOURD_SLOW_FROM_MM     10679    /* ★R29b：减速起点 = 【用户实车标定的那个里程数】10679mm（他发车到"干扰结束处"停下的读数）。不是闸门值 10700，也不是"过了直角弯"这种描述。*/      /* 提前多少 mm 开始减速 */
