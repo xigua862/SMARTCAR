@@ -736,6 +736,7 @@ void line_follow_control(int16_t base)
   {
     uint8_t L = 0xFFu, R = 0u, cnt = 0u, nblob = 0u, prev = 0u, i;
     uint8_t cnt1k = 0u, nblob1k = 0u;   /* ★R37：1kHz 窗口里最宽那一帧的统计 */
+    uint8_t p1k = 0u;
 
     for (i = 0u; i < (uint8_t)LINE_CHANNELS; i++)
     {
@@ -748,6 +749,12 @@ void line_follow_control(int16_t base)
       }
       if ((b != 0u) && (prev == 0u)) nblob++;   /* 连续 1 的段数 = 几个分离的团 */
       prev = b;
+      { /* ★R37：同一趟循环里把 1kHz 窗口最宽帧也统计出来（两帧各自判，任一命中即触发）*/
+        uint8_t b1 = (uint8_t)((s_1k_maxraw >> i) & 1u);
+        if (b1 != 0u) { cnt1k++; }
+        if ((b1 != 0u) && (p1k == 0u)) { nblob1k++; }
+        p1k = b1;
+      }
     }
 
     if (s_be_on)
