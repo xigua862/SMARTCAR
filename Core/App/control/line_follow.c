@@ -1710,8 +1710,8 @@ void line_follow_control(int16_t base)
       }
       if (s_g7_phase == 2u)
       {
-        int16_t a = (int16_t)(sp_curve - G7_TURN_PWM);   /* 左轮慢 */
-        int16_t b = (int16_t)(sp_curve + G7_TURN_PWM);   /* 右轮快 = 左转 */
+        int16_t a = (int16_t)(sp_curve - G7_MAN_TURN_PWM);   /* 左轮慢 */
+        int16_t b = (int16_t)(sp_curve + G7_MAN_TURN_PWM);   /* 右轮快 = 左转 */
         if (a >  99) a =  99;  if (a < -99) a = -99;
         if (b >  99) b =  99;  if (b < -99) b = -99;
         motor_set_differential(a, b);
@@ -1799,8 +1799,8 @@ void line_follow_control(int16_t base)
   if (g7_turn)
   {
     g7_turn--;
-    int16_t a = (int16_t)(sp_curve + G7_TURN_PWM);   /* 左快右慢 = 右转 */
-    int16_t b = (int16_t)(sp_curve - G7_TURN_PWM);
+    int16_t a = (int16_t)(sp_curve + G7_MAN_TURN_PWM);   /* 左快右慢 = 右转 */
+    int16_t b = (int16_t)(sp_curve - G7_MAN_TURN_PWM);
     if (a >  99) a =  99;  if (a < -99) a = -99;
     if (b >  99) b =  99;  if (b < -99) b = -99;
     motor_set_differential(a, b);

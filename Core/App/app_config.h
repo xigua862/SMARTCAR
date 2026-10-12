@@ -1218,7 +1218,7 @@
 #define G7_STOP_TO_MM        13350   /* 窗口终点 */
 #define G7_STOP_MS           300     /* ① 停车时长（ms）—— 把顶死的残余速度清掉 */
 #define G7_TURN_MS           500     /* ② 左转时长（ms）*/
-#define G7_TURN_PWM          30      /* ② 左转差速（左轮 sp-30、右轮 sp+30）★转不够⇒40；转过头⇒20 */
+#define G7_MAN_TURN_PWM      30      /* ② 左转差速（左轮 sp-30、右轮 sp+30）★转不够⇒40；转过头⇒20 */
 
 #define G7_LEFT_FROM_MM      12550   /* 窗口起点（mm）*/
 #define G7_LEFT_TO_MM        13200   /* 窗口终点（mm）*/
