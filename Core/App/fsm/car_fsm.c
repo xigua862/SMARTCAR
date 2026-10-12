@@ -71,6 +71,13 @@ static void enter(car_state_t s)
     cd_step = 0;
     break;
   case CAR_RUN:
+      /* ★R40（用户要求）：自动跑 AUTO_RUN_MS 毫秒后自动停车 —— 起步瞬间记时，之后冻结 */
+      if (odom_distance_mm() < 50) { s_auto_t0 = HAL_GetTick(); }
+      if ((AUTO_RUN_MS > 0u) && ((HAL_GetTick() - s_auto_t0) >= (uint32_t)AUTO_RUN_MS))
+      {
+        car_fsm_finish();   /* = 到站停车（停车+长鸣+闪灯） */
+        break;
+      }
     led_all(0);
     led_set(LED_ID_3, 1);          /* 运行中: 第 3 灯常亮 */
     print_odom("START");           /* ★计程起点: 理论上应为 0 */
@@ -97,6 +104,9 @@ static void enter(car_state_t s)
     break;
   }
 }
+
+/* ★R40：自动停车计时起点（HAL_GetTick 毫秒）*/
+static uint32_t s_auto_t0 = 0u;
 
 void car_fsm_init(void)
 {
@@ -247,6 +257,13 @@ void car_fsm_run(uint32_t dt_ms)
   }
 
   case CAR_RUN:
+      /* ★R40（用户要求）：自动跑 AUTO_RUN_MS 毫秒后自动停车 —— 起步瞬间记时，之后冻结 */
+      if (odom_distance_mm() < 50) { s_auto_t0 = HAL_GetTick(); }
+      if ((AUTO_RUN_MS > 0u) && ((HAL_GetTick() - s_auto_t0) >= (uint32_t)AUTO_RUN_MS))
+      {
+        car_fsm_finish();   /* = 到站停车（停车+长鸣+闪灯） */
+        break;
+      }
     /* LED2: 丢线指示（原有行为，不动） */
     if (line_follow_is_lost()) led_set(LED_ID_2, (uint8_t)((now / 100u) & 1u));
     else                       led_set(LED_ID_2, 0);
