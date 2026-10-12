@@ -2102,6 +2102,17 @@ void line_follow_control(int16_t base)
     if (s_be_just) { s_be_just = 0u; last_e = e; }
   }
 #endif
+  /* ★★★ R57（用户要求：第 7 个切点特殊处理）【到这个点向左巡线 + 轻微左转一点点】★★★
+     说明与取值见 app_config.h 的 G7_LEFT_*。e 为负 = 向左 ✓，所以这里是"减"偏置。
+     ★只在葫芦圈内（里程闸门）且只在窗口内生效 ⇒ 圈外与圈内其余路段完全不受影响 ✓。 */
+  if (s_gourd_armed != 0u)
+  {
+    int32_t g7od = odom_distance_mm();
+    if ((g7od >= (int32_t)G7_LEFT_FROM_MM) && (g7od <= (int32_t)G7_LEFT_TO_MM))
+    {
+      e = (int8_t)((int16_t)e - (int16_t)G7_LEFT_BIAS);
+    }
+  }
   int16_t d_term = (int16_t)(e - last_e);
   /* ★★★ 2026-10-08（1008-R31）【葫芦圈内降低 KP】—— 用户要求 ★★★
      现象：圈上左右晃幅度太大，影响过切点（晃大了图案就更不容易满足"两坨"判据）。
