@@ -1792,6 +1792,9 @@ void line_follow_control(int16_t base)
 #endif
     lost_cycles = 0;
     line_lost   = 0;
+    /* ★R48（用户同意）：圈内全灭太久 ⇒ 强行允许旋转找线（原来这条分支把 line_lost 清 0，救命路径被关掉）*/
+    if (r.active == 0) { if (lost_cycles < 60000u) lost_cycles++; } else { lost_cycles = 0; }
+    if (lost_cycles > (uint16_t)GOURD_LOST_SPIN_AFTER) { line_lost = 1u; }
   }
   else
 #endif /* USE_GOURD_LOST_GUARD */
