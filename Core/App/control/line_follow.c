@@ -131,6 +131,7 @@ static int8_t   gourd_dir    = 1;      /* 进相切点前的误差方向 */
 static uint16_t g7_count   = 0;   /* 最右一路(bit7)累计触发次数（上升沿计数） */
 static uint8_t  s_g7_phase = 0u;   /* ★R59：第7个切点专用动作的阶段（0=未开始 1=停车中 2=左转中 3=已完成）*/
 static uint16_t s_g7_fr    = 0u;   /* ★R59：当前阶段已过的拍数（10ms/拍）*/
+static int32_t  s_g7_last_od = 0;  /* ★R62：上一拍的里程（用于检测"被顶住"）*/
 static uint8_t  g7_prev    = 0;   /* 上一拍 bit7 电平（边沿检测用） */
 static uint8_t  g7_lock    = 0;   /* 计数锁：>0 时不许再计（防抖 / 防一次点亮算多次） */
 static uint8_t  g7_waitmsg = 0;   /* "数够但位置不对"只打印一次 */
@@ -1694,12 +1695,22 @@ void line_follow_control(int16_t base)
 
     /* ★★★ R59（用户要求：第 7 个切点停一下再转）★★★ 说明与取值见 app_config.h 的 G7_STOP_* / G7_TURN_*
        —— 用与出圈右转相同的写法：直接给电机 + return（绕开 PD 与 PWM 下限，否则"停车"会被抬到 20 ✗）。 */
-    if ((s_g7_phase < 3u) && (s_gourd_armed != 0u))
+    if (s_g7_phase < 3u)   /* ★R62：不再要求闸门（闸门为 0 时整段会被跳过 ✗）；只靠"里程 + 顶住"判定 */
     {
       int32_t g7od = odom_distance_mm();
       if (s_g7_phase == 0u)
       {
-        if ((g7od >= (int32_t)G7_STOP_FROM_MM) && (g7od <= (int32_t)G7_STOP_TO_MM)) { s_g7_phase = 1u; s_g7_fr = 0u; }
+        /* ★R62：改成"检测被顶住"—— 不再用绝对里程窗口 */
+        if ((g7od >= (int32_t)G7_STALL_MIN_MM) && ((g7od - s_g7_last_od) < (int32_t)G7_STALL_MM))
+        {
+          if (s_g7_fr < 60000u) s_g7_fr++;
+        }
+        else
+        {
+          s_g7_fr = 0u;
+        }
+        s_g7_last_od = g7od;
+        if (s_g7_fr >= (uint16_t)G7_STALL_FRAMES) { s_g7_phase = 1u; s_g7_fr = 0u; }
       }
       if ((s_g7_phase == 1u) && ((G7_STOP_MS > 0u) || (G7_TURN_MS > 0u)))
       {
