@@ -430,7 +430,7 @@ static uint16_t s_be_log_n = 0u;
 #if USE_BRANCH_EDGE
 /* ★R30：分支口相位翻转用的"两坨图案"边沿检测状态 */
 static uint8_t s_be_twoblob      = 0u;   /* 本拍是否看到两坨（团数 >= 2）*/
-static uint8_t s_be_twoblob_prev = 0u;   /* 上一拍 */
+/* R36b: s_be_twoblob_prev 已废弃（改用 s_be_flip_done 表示"本回合已翻"）*/
 static uint8_t s_be_flip_done    = 0u;   /* ★R36：本回合是否已翻过（图案消失才复位）*/
 #endif
 
@@ -784,7 +784,7 @@ void line_follow_control(int16_t base)
          【触发被接受】时才更新，而两个切点之间这个块不运行 ⇒ prev 永远停在 1
          ⇒ 之后每次都判成"没有上升沿" ⇒ 相位再也不翻 ⇒ 第三个切点起全选错边。
          改成在【每拍都执行到的地方】（nblob 刚算完）更新，历史才是真的历史。 */
-      s_be_twoblob_prev = s_be_twoblob;
+      /* R36b: （上一拍状态不再需要）*/
       s_be_twoblob      = (uint8_t)((nblob >= 2u) ? 1u : 0u);
       /* ★R36：图案消失 ⇒ 重新武装本回合的翻转许可 */
       if (s_be_twoblob == 0u) { s_be_flip_done = 0u; }
