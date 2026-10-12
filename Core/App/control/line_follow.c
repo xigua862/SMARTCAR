@@ -837,7 +837,8 @@ void line_follow_control(int16_t base)
         /* R34: 这两行已上移到 nblob 计算之后（每拍更新）*/
         if ((s_be_twoblob != 0u) && (s_be_flip_done == 0u))
         {
-          s_be_next_l = (uint8_t)(s_be_next_l ? 0u : 1u);   /* 只在跳变沿上翻 */
+          s_be_next_l = (uint8_t)(s_be_next_l ? 0u : 1u);
+          s_be_flip_done = 1u;   /* ★R36：本回合翻过了，图案消失才复位 */   /* 只在跳变沿上翻 */
         }
         /* R34: 这两行已上移到 nblob 计算之后（每拍更新）*/
         s_be_plain  = 0u;
