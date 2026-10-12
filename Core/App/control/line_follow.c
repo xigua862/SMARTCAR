@@ -1879,14 +1879,23 @@ void line_follow_control(int16_t base)
       {
         /* 圈内：连正负号都保住，方向最真实 */
         e = (GOURD_LOST_HOLD_ERR != 0) ? (int8_t)GOURD_LOST_HOLD_ERR : last_error;
+        /* ★R64：圈内这条本来就只给 last_error(±7) ✓；再加一道保险，任何情况下都不超过满舵 */
+        if (e >  7) e =  7;
+        if (e < -7) e = -7;
       }
       else
       {
         /* 圈外：原来的兜底意图保留（沿上次方向加强），但居中时给个最小方向，
            不再出现"e=0 → 直行"的死角 */
-        int16_t ee = (int16_t)(last_error * 2);
+        /* ★★★ R64（2026-10-08）【丢线兜底不再翻倍】★★★
+           实测（第5个切点失败的轨迹）：线一灭，e 立刻变成 -14 = last_error(-7) × 2 ✗
+           ⇒ cor ≈ -22 ⇒ 左轮被命令倒转(-18) ⇒ 车被瞬间甩成原地打转 ⇒ 之后根本走不到切点上。
+           意图保留（沿上次方向继续转 ✓），但力度不该超过满舵 ✗ ⇒ 不再 ×2。 */
+        int16_t ee = (int16_t)last_error;
         if (ee == 0 && last_error != 0) ee = last_error;   /* 防截断成 0 */
         if (ee == 0) ee = GOURD_LOST_MIN_ERR;              /* 居中丢线：给最小方向 */
+        if (ee >  7) ee =  7;   /* ★R64：保险 —— 丢线时的方向量绝不超出传感器量程(±7) */
+        if (ee < -7) ee = -7;
         e = (int8_t)ee;
       }
 #else
