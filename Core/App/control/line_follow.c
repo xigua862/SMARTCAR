@@ -736,6 +736,7 @@ void line_follow_control(int16_t base)
   {
     uint8_t L = 0xFFu, R = 0u, cnt = 0u, nblob = 0u, prev = 0u, i;
     uint8_t cnt1k = 0u, nblob1k = 0u;   /* ★R37：1kHz 窗口里最宽那一帧的统计 */
+    uint8_t wide_ok = 0u;   /* ★R47：出口段(第7个切点)的"宽图案"窄门 */
     uint8_t p1k = 0u;
 
     for (i = 0u; i < (uint8_t)LINE_CHANNELS; i++)
@@ -814,9 +815,19 @@ void line_follow_control(int16_t base)
            · 一坨很宽（例如 01111100 = 5 路一坨）也算切点 ✓（用户 #3）。
          ★R26 之前的写法是 (路数>=5) 【且】(一端被顶住 或 团数>=2) —— 用"且"、且主判据选错
            ⇒ 第 5、第 6 个切点漏触发（台账实测只有 4~5 条，而葫芦圈需要 7 条）。 */
-      if ((gate != 0u) && (cnt <= (uint8_t)CROSS_ACTIVE_MAX) &&
+      /* ★R47（用户要求：第 7 个切点特殊处理）：出口段允许"7 路亮、且唯一灭的那路在两端之一"
+         （= 一大片白 + 一侧到头 = 分叉口的本质）。只在里程窗内放行 ⇒ 不会像 R45 那样到处误触发。 */
+      {
+        int32_t odw = odom_distance_mm();
+        wide_ok = (uint8_t)(((cnt == 7u) &&
+                             (odw >= (int32_t)BRANCH_EDGE_WIDE_FROM_MM) &&
+                             (odw <= (int32_t)BRANCH_EDGE_WIDE_TO_MM) &&
+                             (((L == 0u) && (R == 6u)) || ((L == 1u) && (R == 7u)))) ? 1u : 0u);
+      }
+      if ((gate != 0u) && ((cnt <= (uint8_t)CROSS_ACTIVE_MAX) || (wide_ok != 0u)) &&
           ((nblob >= 2u) || ((nblob == 1u) && (cnt >= (uint8_t)BRANCH_EDGE_MIN_ACT)) ||
-           (nblob1k >= 2u) || ((nblob1k == 1u) && (cnt1k >= (uint8_t)BRANCH_EDGE_MIN_ACT))))
+           (nblob1k >= 2u) || ((nblob1k == 1u) && (cnt1k >= (uint8_t)BRANCH_EDGE_MIN_ACT)) ||
+           (wide_ok != 0u)))
       {
         if (s_be_conf < 255u) s_be_conf++;
       }
