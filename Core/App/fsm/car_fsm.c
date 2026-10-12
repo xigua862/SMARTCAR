@@ -11,6 +11,9 @@
 
 #include <stdio.h>
 
+/* ★R40（用户要求）：自动跑 AUTO_RUN_MS 毫秒后自动停车的计时起点 */
+static uint32_t s_auto_t0 = 0u;
+
 #define CD_STEPS   3u   /* 读秒步数 = 灯数 */
 #define EMG_EXIT_HOLD_MS 2000u   /* ★2026-09-22：在急停里按住 2 秒 → 回待机（不再只能断电） */
 
@@ -104,9 +107,6 @@ static void enter(car_state_t s)
     break;
   }
 }
-
-/* ★R40：自动停车计时起点（HAL_GetTick 毫秒）*/
-static uint32_t s_auto_t0 = 0u;
 
 void car_fsm_init(void)
 {
