@@ -431,6 +431,7 @@ static uint16_t s_be_log_n = 0u;
 /* ★R30：分支口相位翻转用的"两坨图案"边沿检测状态 */
 static uint8_t s_be_twoblob      = 0u;   /* 本拍是否看到两坨（团数 >= 2）*/
 static uint8_t s_be_twoblob_prev = 0u;   /* 上一拍 */
+static uint8_t s_be_flip_done    = 0u;   /* ★R36：本回合是否已翻过（图案消失才复位）*/
 #endif
 
 void line_follow_control(int16_t base)
@@ -785,6 +786,8 @@ void line_follow_control(int16_t base)
          改成在【每拍都执行到的地方】（nblob 刚算完）更新，历史才是真的历史。 */
       s_be_twoblob_prev = s_be_twoblob;
       s_be_twoblob      = (uint8_t)((nblob >= 2u) ? 1u : 0u);
+      /* ★R36：图案消失 ⇒ 重新武装本回合的翻转许可 */
+      if (s_be_twoblob == 0u) { s_be_flip_done = 0u; }
 #if USE_GOURD_ODOM_ARM
       /* ★R21：闸门改用【里程】（用户方案）—— 只在越过 GOURD_ARM_MM 之后才允许接管 */
       uint8_t gate = s_gourd_armed;
@@ -832,7 +835,7 @@ void line_follow_control(int16_t base)
            改成：只在"上一拍没看到两坨 → 这一拍看到了"的跳变沿上翻一次。
            ⇒ 一个切点无论被接受几次，相位只前进一格。 */
         /* R34: 这两行已上移到 nblob 计算之后（每拍更新）*/
-        if ((s_be_twoblob != 0u) && (s_be_twoblob_prev == 0u))
+        if ((s_be_twoblob != 0u) && (s_be_flip_done == 0u))
         {
           s_be_next_l = (uint8_t)(s_be_next_l ? 0u : 1u);   /* 只在跳变沿上翻 */
         }
