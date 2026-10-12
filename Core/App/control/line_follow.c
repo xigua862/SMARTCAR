@@ -737,6 +737,7 @@ void line_follow_control(int16_t base)
     uint8_t L = 0xFFu, R = 0u, cnt = 0u, nblob = 0u, prev = 0u, i;
     uint8_t cnt1k = 0u, nblob1k = 0u;   /* ★R37：1kHz 窗口里最宽那一帧的统计 */
     uint8_t wide_ok = 0u;   /* ★R47：出口段(第7个切点)的"宽图案"窄门 */
+    uint8_t s_be_dark = 0u;   /* ★R49：接管期间连续全灭拍数（超限就退出接管）*/
     uint8_t p1k = 0u;
 
     for (i = 0u; i < (uint8_t)LINE_CHANNELS; i++)
@@ -765,6 +766,14 @@ void line_follow_control(int16_t base)
       if ((cnt >= 1u) && (cnt <= (uint8_t)BRANCH_EDGE_PLAIN_ACT) && (nblob <= 1u))
       {
         if (s_be_plain < 255u) s_be_plain++;
+        /* ★R49（用户同意）：接管期间线全灭太久 ⇒ 立刻退出接管，交给丢线兜底（R48 的旋转找线）。
+           证据：失败趟 T106 接管后线立刻全灭，但分支口模式还挂着 600ms 硬转（PWM=-18/51）⇒ 车被带出线外僵住。 */
+        if (cnt == 0u) { if (s_be_dark < 255u) s_be_dark++; } else { s_be_dark = 0u; }
+        if (s_be_dark >= (uint8_t)BRANCH_EDGE_DARK_EXIT)
+        {
+          s_be_on   = 0u;   /* 退出接管 */
+          s_be_dark = 0u;
+        }
       }
       else
       {
