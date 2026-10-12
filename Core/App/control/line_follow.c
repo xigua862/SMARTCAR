@@ -1708,6 +1708,13 @@ void line_follow_control(int16_t base)
       if (s_g7_phase == 0u)
       {
         /* ★R62：改成"检测被顶住"—— 不再用绝对里程窗口 */
+        /* ★R67：图案条件 —— 亮路数 ≥ G7_STALL_MIN_LIT（一大片白）才允许判定顶死 */
+        uint8_t g7lit = 0u;
+        {
+          line_reading_t r2 = line_read();
+          uint8_t i2;
+          for (i2 = 0u; i2 < (uint8_t)LINE_CHANNELS; i2++) { if (((r2.raw >> i2) & 1u) != 0u) { g7lit++; } }
+        }
         if ((g7od >= (int32_t)G7_STALL_MIN_MM) && (g7lit >= (uint8_t)G7_STALL_MIN_LIT) &&
             ((g7od - s_g7_last_od) < (int32_t)G7_STALL_MM))
         {
