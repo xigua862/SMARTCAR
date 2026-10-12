@@ -76,6 +76,12 @@ static void enter(car_state_t s)
   case CAR_RUN:
       /* ★R40（用户要求）：自动跑 AUTO_RUN_MS 毫秒后自动停车 —— 起步瞬间记时，之后冻结 */
       if (odom_distance_mm() < 50) { s_auto_t0 = HAL_GetTick(); }
+      /* ★R51（用户要求：怀疑里程计有问题）：到达指定里程就停车 ⇒ 便于用卷尺核对里程计准不准 */
+      if ((AUTO_STOP_MM > 0u) && (odom_distance_mm() >= (int32_t)AUTO_STOP_MM))
+      {
+        car_fsm_finish();   /* = 到站停车 */
+        break;
+      }
       if ((AUTO_RUN_MS > 0u) && ((HAL_GetTick() - s_auto_t0) >= (uint32_t)AUTO_RUN_MS))
       {
         car_fsm_finish();   /* = 到站停车（停车+长鸣+闪灯） */
@@ -259,6 +265,12 @@ void car_fsm_run(uint32_t dt_ms)
   case CAR_RUN:
       /* ★R40（用户要求）：自动跑 AUTO_RUN_MS 毫秒后自动停车 —— 起步瞬间记时，之后冻结 */
       if (odom_distance_mm() < 50) { s_auto_t0 = HAL_GetTick(); }
+      /* ★R51（用户要求：怀疑里程计有问题）：到达指定里程就停车 ⇒ 便于用卷尺核对里程计准不准 */
+      if ((AUTO_STOP_MM > 0u) && (odom_distance_mm() >= (int32_t)AUTO_STOP_MM))
+      {
+        car_fsm_finish();   /* = 到站停车 */
+        break;
+      }
       if ((AUTO_RUN_MS > 0u) && ((HAL_GetTick() - s_auto_t0) >= (uint32_t)AUTO_RUN_MS))
       {
         car_fsm_finish();   /* = 到站停车（停车+长鸣+闪灯） */
