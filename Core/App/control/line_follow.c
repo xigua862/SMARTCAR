@@ -2095,6 +2095,9 @@ void line_follow_control(int16_t base)
   {
     int16_t es = line_error_side(r.raw, (uint8_t)BRANCH_EDGE_N,
                                  (uint8_t)(s_be_side ? 0u : 1u));
+    /* ★R50（用户同意）：给接管的误差加上限 —— 见 app_config.h 的 BRANCH_EDGE_ERR_MAX */
+    if (es >  (int16_t)BRANCH_EDGE_ERR_MAX) { es =  (int16_t)BRANCH_EDGE_ERR_MAX; }
+    if (es < -(int16_t)BRANCH_EDGE_ERR_MAX) { es = -(int16_t)BRANCH_EDGE_ERR_MAX; }
     e = (int8_t)(((int16_t)BRANCH_EDGE_SIGN) * es);
     if (s_be_just) { s_be_just = 0u; last_e = e; }
   }
