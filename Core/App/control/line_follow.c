@@ -735,6 +735,7 @@ void line_follow_control(int16_t base)
    * ==========================================================================*/
   {
     uint8_t L = 0xFFu, R = 0u, cnt = 0u, nblob = 0u, prev = 0u, i;
+    uint8_t cnt1k = 0u, nblob1k = 0u;   /* ★R37：1kHz 窗口里最宽那一帧的统计 */
 
     for (i = 0u; i < (uint8_t)LINE_CHANNELS; i++)
     {
@@ -807,7 +808,8 @@ void line_follow_control(int16_t base)
          ★R26 之前的写法是 (路数>=5) 【且】(一端被顶住 或 团数>=2) —— 用"且"、且主判据选错
            ⇒ 第 5、第 6 个切点漏触发（台账实测只有 4~5 条，而葫芦圈需要 7 条）。 */
       if ((gate != 0u) && (cnt <= (uint8_t)CROSS_ACTIVE_MAX) &&
-          ((nblob >= 2u) || ((nblob == 1u) && (cnt >= (uint8_t)BRANCH_EDGE_MIN_ACT))))
+          ((nblob >= 2u) || ((nblob == 1u) && (cnt >= (uint8_t)BRANCH_EDGE_MIN_ACT)) ||
+           (nblob1k >= 2u) || ((nblob1k == 1u) && (cnt1k >= (uint8_t)BRANCH_EDGE_MIN_ACT))))
       {
         if (s_be_conf < 255u) s_be_conf++;
       }
