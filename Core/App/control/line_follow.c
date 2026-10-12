@@ -1708,7 +1708,8 @@ void line_follow_control(int16_t base)
       if (s_g7_phase == 0u)
       {
         /* ★R62：改成"检测被顶住"—— 不再用绝对里程窗口 */
-        if ((g7od >= (int32_t)G7_STALL_MIN_MM) && ((g7od - s_g7_last_od) < (int32_t)G7_STALL_MM))
+        if ((g7od >= (int32_t)G7_STALL_MIN_MM) && (g7lit >= (uint8_t)G7_STALL_MIN_LIT) &&
+            ((g7od - s_g7_last_od) < (int32_t)G7_STALL_MM))
         {
           if (s_g7_fr < 60000u) s_g7_fr++;
         }
