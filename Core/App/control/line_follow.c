@@ -452,6 +452,7 @@ typedef struct {
 #define CAND_MAX 40
 static cand_t   s_cand[CAND_MAX];
 static uint16_t s_cand_n = 0u;
+static int32_t  s_cand_last_od = -1000;   /* ★R116：上一条候选的里程（按距离去重 ✓）*/
 #endif
 
 #if USE_BRANCH_EDGE
@@ -915,7 +916,13 @@ void line_follow_control(int16_t base)
       /* ★R100：加【和接管同一个闸门】（s_gourd_armed ✓）—— 否则起步阶段的斑马线/起跑线会把 40 条刷满 ✗
          （实测：上一趟头 60mm 就写了 25 条 ⇒ 表只到 11.4m ⇒ 出口那一段永远看不到 ✗）。
          圈外一条不记 ✓ ⇒ 40 条足够覆盖整圈 + 出口 ✓✓。 */
-      if ((s_gourd_armed != 0u) && (nblob >= 2u) && (s_be_flip_done == 0u) && (s_cand_n < (uint16_t)CAND_MAX))
+      /* ★R116【修葫芦圈的第一步：让日志能看见"单团"的切点】
+         实测：两处切点（约 11770~12010 与 12670~13090）【一条候选都没有】✗
+         ⇒ 因为原来只记"团数 ≥ 2"✗，而那两处是【单团】⇒ 我们对它一无所知。
+         改成：团数 ≥ 2 【或】亮路数 ≥ 4 都算候选 ✓；并按【距离 ≥150mm】去重 ✓ ⇒ 40 条够覆盖整圈 ✓。 */
+      if ((s_gourd_armed != 0u) && (s_cand_n < (uint16_t)CAND_MAX) &&
+          ((nblob >= 2u) || (cnt >= 4u)) &&
+          ((odom_distance_mm() - s_cand_last_od) >= 150))
       {
         s_cand[s_cand_n].od  = odom_distance_mm();
         s_cand[s_cand_n].raw = (uint8_t)(r.raw & 0xFFu);
@@ -924,6 +931,7 @@ void line_follow_control(int16_t base)
         s_cand[s_cand_n].act = cnt;
         s_cand[s_cand_n].acc = 0u;
         s_cand_n++;
+        s_cand_last_od = s_cand[s_cand_n - 1u].od;   /* ★R116：记住去重基准 ✓ */
       }
       /* ★R36：图案消失 ⇒ 重新武装本回合的翻转许可 */
       if (s_be_twoblob == 0u) { s_be_flip_done = 0u; }
