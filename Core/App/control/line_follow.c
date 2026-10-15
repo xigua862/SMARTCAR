@@ -871,7 +871,10 @@ void line_follow_control(int16_t base)
       /* R36b: （上一拍状态不再需要）*/
       s_be_twoblob      = (uint8_t)((nblob >= 2u) ? 1u : 0u);
       /* ★R98：候选也记一条（acc=0 = 没被接受 ✓）——【团数 ≥ 2】就算候选 ✓ */
-      if ((nblob >= 2u) && (s_cand_n < (uint16_t)CAND_MAX))
+      /* ★R99：改成【每个"两坨"回合只记第一拍】✓（原来每拍都记 ✗ ⇒ 40 条在第一个切点就快满了 ✗）。
+         用现成的回合状态 s_be_flip_done：== 0 表示"本回合还没被消费"✓ ⇒ 只在回合首拍记录 ✓。
+         ⇒ 一趟下来约 10~20 条 ✓ ⇒ 缓冲区足以覆盖【整趟 + 出口】✓✓。 */
+      if ((nblob >= 2u) && (s_be_flip_done == 0u) && (s_cand_n < (uint16_t)CAND_MAX))
       {
         s_cand[s_cand_n].od  = odom_distance_mm();
         s_cand[s_cand_n].raw = (uint8_t)(r.raw & 0xFFu);
