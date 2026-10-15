@@ -2549,6 +2549,24 @@ void line_follow_control(int16_t base)
 
   /* ★2026-09-26 诊断：记下"真正下发给电机的 PWM"，遥测 PWM=l/r 打出来。
      放在 motor_set_differential 之前，保证与电机收到的值完全一致。 */
+#if WHEEL_SLEW_STEP
+  /* ★R82（2026-10-08）【最后一级斜率限制】—— 把"PWM 下限抬升 / NO-STOP-BRAKE 钳位 / 环路输出跳变"
+     这些【台阶】全部抹平 ⇒ 电机命令每拍最多变 WHEEL_SLEW_STEP ⇒ 转弯连续、不再一抽一抽 ✓。
+     这就是用户从最开始就说的"转向差速要连续变化、不要突变"的最终落地 ✓。
+     ★回退：WHEEL_SLEW_STEP 设 0。★迟钝⇒加到8；还抽⇒减到4。 */
+  {
+    int16_t d1 = (int16_t)(m1 - s_slew_m1);
+    int16_t d2 = (int16_t)(m2 - s_slew_m2);
+    if (d1 >  (int16_t)WHEEL_SLEW_STEP) { d1 =  (int16_t)WHEEL_SLEW_STEP; }
+    if (d1 < -(int16_t)WHEEL_SLEW_STEP) { d1 = -(int16_t)WHEEL_SLEW_STEP; }
+    if (d2 >  (int16_t)WHEEL_SLEW_STEP) { d2 =  (int16_t)WHEEL_SLEW_STEP; }
+    if (d2 < -(int16_t)WHEEL_SLEW_STEP) { d2 = -(int16_t)WHEEL_SLEW_STEP; }
+    m1 = (int16_t)(s_slew_m1 + d1);
+    m2 = (int16_t)(s_slew_m2 + d2);
+    s_slew_m1 = m1;
+    s_slew_m2 = m2;
+  }
+#endif
   pwm_out[0] = m1;
   pwm_out[1] = m2;
   motor_set_differential(m1, m2);
