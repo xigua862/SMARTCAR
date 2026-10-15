@@ -9,7 +9,15 @@
 /* 保留 G40 的转速幅值接口及每拍变化限制，不改变编码器方向约定。 */
 #define SPEED_MAX_RPM          1000UL
 #define SPEED_MAX_PERIOD_MS    100UL
-#define SPEED_MAX_RPM_STEP      150
+#define SPEED_MAX_RPM_STEP       50    /* ★R80（2026-10-08）150 -> 50。理由：150 相当于"每 10ms 允许转速跳 70% 满量程"✗（文档自己写着 10ms 窗口物理上限≈213rpm），速度环照样看到大跳变 ⇒ 主干道/弯道都"一抽一抽"。收紧到 50 ⇒ 既挡垃圾值、又真正平滑反馈 ✓。★若发现响应变迟钝（加速变慢）⇒ 放到 80。 */
+
+/* ★★★ 2026-10-08（1008-R81）【转速反馈 EMA（α=1/4，纯整数）】★★★
+   为什么：7 计数/圈 + 10ms 窗口 ⇒ 130rpm 时每拍只有 ~2 个计数 ⇒ 量化噪声 ≈ ±50% ✗
+         直接喂给 PID ⇒ 输出一跳一跳 ⇒ 车"一抽一抽"（主干道也抽 ✓）。
+   做法：对返回给控制环的转速做一阶低通（rpm = (3*旧 + 新)/4 ✓），纯整数、无浮点 ✓。
+   ★回退：USE_RPM_EMA 设 0（回到原始转速反馈）。★若发现响应变迟钝/加速变慢 ⇒ 把 3/4 改成 1/2。 */
+#define USE_RPM_EMA              1
+static int16_t rpm_ema[2] = {0, 0};   /* ★R81：转速反馈的低通状态 */
 #define HALL_PULSES_PER_REV     1UL
 
 #if USE_ENCODER
@@ -100,7 +108,13 @@ void speed_update(void)
       rpm = (int32_t)rpm_arr[v] - SPEED_MAX_RPM_STEP;
 #endif
     if (rpm > 30000) rpm = 30000;
+#if USE_RPM_EMA
+    /* ★R81：一阶低通（α=1/4）—— 抹掉 10ms 窗口的量化噪声（±50%），让速度环看到平滑反馈 ✓ */
+    rpm_ema[v] = (int16_t)(((int32_t)rpm_ema[v] * 3 + (int32_t)rpm) / 4);
+    rpm_arr[v] = rpm_ema[v];
+#else
     rpm_arr[v] = (int16_t)rpm;
+#endif
   }
 }
 
