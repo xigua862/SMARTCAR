@@ -451,11 +451,11 @@ void line_follow_control(int16_t base)
     line_reading_t ra = line_read();
     uint8_t  ia;
     uint8_t  lit = 0u;
+    uint8_t  g7nb = 0u;   /* ★R72：团数 */
+    uint8_t  g7pv = 0u;   /* ★R72：上一路是否亮（数团用）*/
     int32_t  od  = odom_distance_mm();
     for (ia = 0u; ia < (uint8_t)LINE_CHANNELS; ia++) { if (((ra.raw >> ia) & 1u) != 0u) { lit++; } }
-    /* ★R72：顺便数"团数"（连续 1 的段数）—— 判"两坨 → 一坨"用 */
-    uint8_t g7nb = 0u;
-    uint8_t g7pv = 0u;
+    /* ★R72：顺便数"团数"（连续 1 的段数）—— 判"两坨 → 一坨"用（变量已在块首声明 ✓）*/
     for (ia = 0u; ia < (uint8_t)LINE_CHANNELS; ia++)
     {
       uint8_t g7b = (uint8_t)((ra.raw >> ia) & 1u);
