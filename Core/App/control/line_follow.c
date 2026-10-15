@@ -480,7 +480,7 @@ void line_follow_control(int16_t base)
       s_fin_fr++;
       if (s_fin_fr >= (uint16_t)((EXIT_FINISH_MS + 9u) / 10u)) { s_fin_state = 2u; }
     }
-    else if ((EXIT_FINISH_MS > 0u) && (odom_distance_mm() >= (int32_t)EXIT_FINISH_MM))
+    else if ((EXIT_FINISH_MS > 0u) && (EXIT_FINISH_MM > 0) && (odom_distance_mm() >= (int32_t)EXIT_FINISH_MM))   /* ★R110：门槛必须 > 0 ⇒ 写 0 = 关闭 ✓（防误触发）*/
     {
       line_reading_t fnr = line_read();
       uint8_t fn_raw = (uint8_t)(fnr.raw & 0xFFu);
