@@ -2390,6 +2390,18 @@ void line_follow_control(int16_t base)
     float o2 = pid_update(&spd_pid[1], tgt_rpm[1], (float)speed_get_rpm(MOTOR_RIGHT), dt);
 #endif
 
+#if USE_SPD_AVG_DIFF
+    /* ★R79（A1）：速度环只控"平均速度"，差速由 corr 开环直接决定 ⇒ 两个 PID 不再互相抢差速 ✓
+       为什么这样能治"一顿一顿"：原来内轮转速被转弯拖慢 ⇒ 它的 PID 加 PWM 去追 ✗ ⇒
+       与外轮互相顶 ⇒ 差速忽大忽小。取平均后，"整体快慢"仍由闭环保证 ✓，而"左右差多少"
+       完全由 corr 决定 ✓ ⇒ 转弯连续、可预期 ✓。 */
+    {
+      float oavg = (o1 + o2) * 0.5f;
+      o1 = oavg + (float)corr;
+      o2 = oavg - (float)corr;
+    }
+#endif
+
     /* ★2026-09-26 左右轮效率补偿：最终输出也按增益缩放。
        ★为什么"目标转速不缩放、只缩放输出"：
          手的判别测试证明【编码器是准的】（同样物理位移下两轮读数只差 1.73%）
