@@ -129,9 +129,9 @@ static int8_t   gourd_dir    = 1;      /* 进相切点前的误差方向 */
    ★这几个变量【无条件声明】（不放进 #if）—— 2026-09-22 那次"宏开关漏罩 init"的编译事故
    就是 #if 范围不一致造成的，这里一律全声明、只在真正使用的地方 #if。 */
 static uint16_t g7_count   = 0;   /* 最右一路(bit7)累计触发次数（上升沿计数） */
-static uint8_t  s_g7_phase = 0u;   /* ★R59：第7个切点专用动作的阶段（0=未开始 1=停车中 2=左转中 3=已完成）*/
-static uint16_t s_g7_fr    = 0u;   /* ★R59：当前阶段已过的拍数（10ms/拍）*/
-static int32_t  s_g7_last_od = 0;  /* ★R62：上一拍的里程（用于检测"被顶住"）*/
+/* R78: s_g7_phase 已废弃（救援代码已删）*/
+/* R78: s_g7_fr 已废弃 */
+/* R78: s_g7_last_od 已废弃 */
 static uint8_t  g7_prev    = 0;   /* 上一拍 bit7 电平（边沿检测用） */
 static uint8_t  g7_lock    = 0;   /* 计数锁：>0 时不许再计（防抖 / 防一次点亮算多次） */
 static uint8_t  g7_waitmsg = 0;   /* "数够但位置不对"只打印一次 */
