@@ -1695,13 +1695,6 @@ void line_follow_control(int16_t base)
 
     /* ★★★ R59（用户要求：第 7 个切点停一下再转）★★★ 说明与取值见 app_config.h 的 G7_STOP_* / G7_TURN_*
        —— 用与出圈右转相同的写法：直接给电机 + return（绕开 PD 与 PWM 下限，否则"停车"会被抬到 20 ✗）。 */
-    /* ★R63（用户要求，诊断用）：识别到第 G7_DIAG_STOP_N 个切点 ⇒ 立刻停车（两轮 0 + return）
-       —— 台账条数 s_be_log_n 就是"已经识别到几个切点" ✓ */
-    if ((G7_DIAG_STOP_N > 0u) && (s_be_log_n >= (uint16_t)G7_DIAG_STOP_N))
-    {
-      motor_set_differential(0, 0);
-      return;
-    }
     if (s_g7_phase < 3u)   /* ★R62：不再要求闸门（闸门为 0 时整段会被跳过 ✗）；只靠"里程 + 顶住"判定 */
     {
       int32_t g7od = odom_distance_mm();
