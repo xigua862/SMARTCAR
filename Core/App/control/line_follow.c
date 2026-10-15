@@ -439,61 +439,6 @@ static uint8_t s_be_flip_done    = 0u;   /* ★R36：本回合是否已翻过（
 
 void line_follow_control(int16_t base)
 {
-  /* ★★★ 2026-10-08（1008-R68，用户同意）【把"顶死救援"整段挪到函数最前面】★★★
-     为什么必须挪：放在出口段之前时，实测被更早的分支 return 抢先 —— s_g7_last_od 冻在 10800 ✗、
-     f=0 ✗、s_g7_fr=0 ✗ ⇒ 车在白片上顶死（OD 10844）却永远等不到救援。
-     挪到最前面 ⇒ 任何分支都抢不走 ✓。触发条件仍是"一大片白(亮路数≥7) + 里程连续20拍几乎不涨" ✓。
-     ★回退：G7_STOP_MS 与 G7_TURN_MS 都设 0 ⇒ 只剩诊断停车；G7_DIAG_STOP_N 设 0 ⇒ 彻底关闭。 */
-  {
-    line_reading_t ra = line_read();
-    uint8_t  ia;
-    uint8_t  lit = 0u;
-    int32_t  od  = odom_distance_mm();
-    for (ia = 0u; ia < (uint8_t)LINE_CHANNELS; ia++) { if (((ra.raw >> ia) & 1u) != 0u) { lit++; } }
-    if ((G7_DIAG_STOP_N > 0u) && (s_be_log_n >= (uint16_t)G7_DIAG_STOP_N))   /* 诊断停车 */
-    {
-      motor_set_differential(0, 0);
-      return;
-    }
-    if (s_g7_phase < 3u)
-    {
-      if (s_g7_phase == 0u)
-      {
-        if ((od >= (int32_t)G7_STALL_MIN_MM) && (lit >= (uint8_t)G7_STALL_MIN_LIT) &&
-            ((od - s_g7_last_od) < (int32_t)G7_STALL_MM))
-        {
-          if (s_g7_fr < 60000u) { s_g7_fr++; }
-        }
-        else
-        {
-          s_g7_fr = 0u;
-        }
-        s_g7_last_od = od;
-        if (s_g7_fr >= (uint16_t)G7_STALL_FRAMES) { s_g7_phase = 1u; s_g7_fr = 0u; }
-      }
-      if ((s_g7_phase == 1u) && ((G7_STOP_MS > 0u) || (G7_TURN_MS > 0u)))
-      {
-        motor_set_differential(0, 0);
-        s_g7_fr++;
-        if (s_g7_fr >= (uint16_t)((G7_STOP_MS + 9u) / 10u)) { s_g7_phase = 2u; s_g7_fr = 0u; }
-        return;
-      }
-      if (s_g7_phase == 2u)
-      {
-        int16_t a = (int16_t)(G7_MAN_SPEED - G7_MAN_TURN_PWM);
-        int16_t b = (int16_t)(G7_MAN_SPEED + G7_MAN_TURN_PWM);
-        if (a >  99) { a =  99; }  if (a < -99) { a = -99; }
-        if (b >  99) { b =  99; }  if (b < -99) { b = -99; }
-        motor_set_differential(a, b);
-        last_error  = -3;
-        lost_cycles = 0;
-        line_lost   = 0;
-        s_g7_fr++;
-        if (s_g7_fr >= (uint16_t)((G7_TURN_MS + 9u) / 10u)) { s_g7_phase = 3u; }
-        return;
-      }
-    }
-  }
   line_reading_t r = line_read();
   int8_t e = r.error;
 
