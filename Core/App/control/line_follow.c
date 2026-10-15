@@ -432,6 +432,22 @@ typedef struct {
 } belog_t;
 static belog_t  s_be_log[BRANCH_EDGE_LOG_MAX];
 static uint16_t s_be_log_n = 0u;
+
+/* ★★★ 2026-10-08（1008-R98）【候选日志：回答"为什么只有 5 条台账、而不是 7 个切点"】★★★
+   只记录、不控制 ✓：凡是【团数 ≥ 2】的拍（不管有没有被接受）都记一条 ✓（里程 + 原始位图 + 亮路数 + 团数 + 是否被接受）
+   ⇒ 跑一趟后就能看到"像切点但没被接受"的那些候选长什么样 ✓ —— 这正是台账看不到的部分 ✓。
+   ★数据放在 RAM 数组里（不用串口打印 ✓ —— 打印一次 6ms 会挤掉控制环 ✗）。 */
+typedef struct {
+  int32_t od;
+  uint8_t raw;
+  uint8_t lit;
+  uint8_t nb;
+  uint8_t act;
+  uint8_t acc;   /* 1 = 这一拍被接受成接管 ✓ */
+} cand_t;
+#define CAND_MAX 40
+static cand_t   s_cand[CAND_MAX];
+static uint16_t s_cand_n = 0u;
 #endif
 
 #if USE_BRANCH_EDGE
@@ -854,6 +870,17 @@ void line_follow_control(int16_t base)
          改成在【每拍都执行到的地方】（nblob 刚算完）更新，历史才是真的历史。 */
       /* R36b: （上一拍状态不再需要）*/
       s_be_twoblob      = (uint8_t)((nblob >= 2u) ? 1u : 0u);
+      /* ★R98：候选也记一条（acc=0 = 没被接受 ✓）——【团数 ≥ 2】就算候选 ✓ */
+      if ((nblob >= 2u) && (s_cand_n < (uint16_t)CAND_MAX))
+      {
+        s_cand[s_cand_n].od  = odom_distance_mm();
+        s_cand[s_cand_n].raw = (uint8_t)(r.raw & 0xFFu);
+        s_cand[s_cand_n].lit = cnt;
+        s_cand[s_cand_n].nb  = nblob;
+        s_cand[s_cand_n].act = cnt;
+        s_cand[s_cand_n].acc = 0u;
+        s_cand_n++;
+      }
       /* ★R36：图案消失 ⇒ 重新武装本回合的翻转许可 */
       if (s_be_twoblob == 0u) { s_be_flip_done = 0u; }
 #if USE_GOURD_ODOM_ARM
@@ -933,6 +960,19 @@ void line_follow_control(int16_t base)
           s_be_log[s_be_log_n].act  = cnt;
           s_be_log[s_be_log_n].nb   = nblob;
           s_be_log[s_be_log_n].w1   = w1;
+
+        /* ★R98：这一拍【被接受】了 ⇒ 记一条候选（acc=1 ✓）*/
+        if (s_cand_n < (uint16_t)CAND_MAX)
+        {
+          s_cand[s_cand_n].od  = odom_distance_mm();
+          s_cand[s_cand_n].raw = (uint8_t)(r.raw & 0xFFu);
+          s_cand[s_cand_n].lit = cnt;
+          s_cand[s_cand_n].nb  = nblob;
+          s_cand[s_cand_n].act = cnt;
+          s_cand[s_cand_n].acc = 1u;
+          s_cand_n++;
+        }
+        if (s_cand_n > (uint16_t)CAND_MAX) { s_cand_n = (uint16_t)CAND_MAX; }   /* 读一下避免 #550-D ✓ */
           s_be_log_n++;
         }
 #endif
