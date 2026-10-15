@@ -505,7 +505,8 @@ void line_follow_control(int16_t base)
           ex_pv = ex_b;
         }
         /* ★R97（用户新定义）：异常 = 【亮起的路数 > 4】✓（统一规定；出口那片宽图案正好满足 ✓）*/
-        if (ex_lit > 4u)
+        /* ★R107：阈值改为可调（用户实测"亮路数 > 4"在出口处从未满足 ✗）*/
+        if (ex_lit >= (uint8_t)EXIT_ANOM_LIT_MIN)
         {
           s_ex_adv = odom_distance_mm();   /* ★R102：只记住起点 ⇒ 先往前走一段（不马上转 ✓）*/
         }
