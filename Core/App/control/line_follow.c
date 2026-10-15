@@ -182,6 +182,8 @@ static pid_t spd_pid[2];   /* 左右轮速度环(编码器闭环) */
 static uint16_t s_ex_tmr  = 0u;   /* ★R91：出口右转剩余拍数（>0 = 正在右转）*/
 static uint8_t  s_ex_done = 0u;   /* ★R91：出口右转是否已完成（一趟只做一次）*/
 static int32_t  s_ex_adv  = -1;   /* ★R102：进入"前进一小段"时的里程（-1 = 还没进入 ✓）*/
+static uint8_t  s_fin_state = 0u;   /* ★R108：终点状态（0=未触发 1=前进中 2=已停车 ✓）*/
+static uint16_t s_fin_fr    = 0u;   /* ★R108：终点"再前进"已过的拍数 */
 static int16_t s_slew_m1 = 0;   /* ★R82：上一拍最终输给左轮的 PWM（斜率限制用）*/
 static int16_t s_slew_m2 = 0;   /* ★R82：右轮 */
 #if SPD_DEAD_FB_GUARD
@@ -465,7 +467,27 @@ void line_follow_control(int16_t base)
            其他地方一律不动 ✓（不碰 CALIB_ONLY ✗、不碰出口旧判据 ✗、不碰葫芦圈里程 ✗）。
      异常 = ① 一侧全灭（最左两路都黑 或 最右两路都黑）② 分离段数 ≥ 4。
      转向 = 定时右转（EXIT_TURN_MS）✓，剩余偏差交给巡线 PID ✓。放在函数最前面 ⇒ 谁都抢不走 ✓。 */
-  {
+  
+    /* ★R108（用户要求）：终点停车 —— 第二道里程 + 异常 ⇒ 再正常前进 EXIT_FINISH_MS ⇒ 停车并保持 ✓ */
+    if (s_fin_state == 2u)
+    {
+      motor_set_differential(0, 0);   /* 已停车 ⇒ 一直保持 ✓ */
+      return;
+    }
+    if (s_fin_state == 1u)
+    {
+      /* 前进阶段：不 return ⇒ 完全交给正常巡线 ✓ */
+      s_fin_fr++;
+      if (s_fin_fr >= (uint16_t)((EXIT_FINISH_MS + 9u) / 10u)) { s_fin_state = 2u; }
+    }
+    else if ((EXIT_FINISH_MS > 0u) && (odom_distance_mm() >= (int32_t)EXIT_FINISH_MM))
+    {
+      line_reading_t fnr = line_read();
+      uint8_t fn_raw = (uint8_t)(fnr.raw & 0xFFu);
+      uint8_t fn_lit = 0u, fn_i;
+      for (fn_i = 0u; fn_i < 8u; fn_i++) { if (((fn_raw >> fn_i) & 1u) != 0u) { fn_lit++; } }
+      if (fn_lit >= (uint8_t)EXIT_ANOM_LIT_MIN) { s_fin_state = 1u; s_fin_fr = 0u; }
+    }{
     if (s_ex_done == 0u)
     {
       if (s_ex_tmr > 0u)
