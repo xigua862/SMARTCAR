@@ -181,6 +181,7 @@ static float s_corr_trim = 0.0f;
 static pid_t spd_pid[2];   /* 左右轮速度环(编码器闭环) */
 static uint16_t s_ex_tmr  = 0u;   /* ★R91：出口右转剩余拍数（>0 = 正在右转）*/
 static uint8_t  s_ex_done = 0u;   /* ★R91：出口右转是否已完成（一趟只做一次）*/
+static int32_t  s_ex_adv  = -1;   /* ★R102：进入"前进一小段"时的里程（-1 = 还没进入 ✓）*/
 static int16_t s_slew_m1 = 0;   /* ★R82：上一拍最终输给左轮的 PWM（斜率限制用）*/
 static int16_t s_slew_m2 = 0;   /* ★R82：右轮 */
 #if SPD_DEAD_FB_GUARD
@@ -481,7 +482,16 @@ void line_follow_control(int16_t base)
         if (s_ex_tmr == 0u) { s_ex_done = 1u; }   /* 转完 ⇒ 恢复普通巡线 ✓ */
         return;
       }
-      if ((EXIT_TURN_MS > 0u) && (odom_distance_mm() >= (int32_t)GOURD_EXIT_FROM_MM))
+      /* ★R102（用户要求）：两步走 —— ① 识别到异常 ⇒ 记住起点、先【正常巡线往前走 EXIT_ADVANCE_MM】✓；
+         ② 走够了 ⇒ 才启用转向 ✓。（前进期间不 return ⇒ 控制完全交给正常巡线 ⇒ 零干预 ✓） */
+      if ((s_ex_adv >= 0) && (EXIT_TURN_MS > 0u))
+      {
+        if ((odom_distance_mm() - s_ex_adv) >= (int32_t)EXIT_ADVANCE_MM)
+        {
+          s_ex_tmr = (uint16_t)((EXIT_TURN_MS + 9u) / 10u);   /* 走够了 ⇒ 开始右转 ✓ */
+        }
+      }
+      else if ((EXIT_TURN_MS > 0u) && (odom_distance_mm() >= (int32_t)GOURD_EXIT_FROM_MM))
       {
         line_reading_t exr = line_read();
         uint8_t ex_raw  = (uint8_t)(exr.raw & 0xFFu);
@@ -497,7 +507,7 @@ void line_follow_control(int16_t base)
         /* ★R97（用户新定义）：异常 = 【亮起的路数 > 4】✓（统一规定；出口那片宽图案正好满足 ✓）*/
         if (ex_lit > 4u)
         {
-          s_ex_tmr = (uint16_t)((EXIT_TURN_MS + 9u) / 10u);   /* 10ms/拍 ✓ */
+          s_ex_adv = odom_distance_mm();   /* ★R102：只记住起点 ⇒ 先往前走一段（不马上转 ✓）*/
         }
       }
     }
