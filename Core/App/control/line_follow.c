@@ -3255,6 +3255,22 @@ uint8_t line_follow_boost_active(void)
 }
 
 /* ★弯道计数（2026-09-22 他提的方案）—— 这三个无条件提供，遥测/状态机直接用 */
+/* ★R72：出口段逐拍位图记录器的读取口 —— 既供读芯片时使用，也消掉"静态数组只写不读"的编译警告 ✓ */
+uint16_t line_follow_rec_n(void)
+{
+  return s_rec_n;
+}
+
+const uint8_t *line_follow_rec_ir(void)
+{
+  return (const uint8_t *)s_rec_ir;
+}
+
+const int16_t *line_follow_rec_od(void)
+{
+  return (const int16_t *)s_rec_od;
+}
+
 uint16_t line_follow_g7_count(void)
 {
   return g7_count;      /* 最右一路已触发次数（实时，跑一圈看它在出口读到多少） */
