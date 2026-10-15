@@ -2639,7 +2639,15 @@ void line_follow_control(int16_t base)
 #endif
 
   /* ★2026-09-26 诊断：记下"真正下发给电机的 PWM"，遥测 PWM=l/r 打出来。
-     放在 motor_set_differential 之前，保证与电机收到的值完全一致。 */
+     放在 motor_set_differential 之前，保证与电机收到的值完全一致。 */
+  /* ★R101（用户要求）：到达右转里程后【减速 80%】✓，出圈（s_ex_done=1）后自动恢复 ✓
+     作用在最终两轮命令上 ⇒ 无论速度环如何调都有效 ✓；缩放是两轮同比例 ⇒ 保持转向关系 ✓。 */
+  if ((EXIT_SLOW_PCT > 0u) && (EXIT_SLOW_PCT < 100u) && (s_ex_done == 0u) &&
+      (odom_distance_mm() >= (int32_t)GOURD_EXIT_FROM_MM))
+  {
+    m1 = (int16_t)(((int32_t)m1 * (int32_t)EXIT_SLOW_PCT) / 100);
+    m2 = (int16_t)(((int32_t)m2 * (int32_t)EXIT_SLOW_PCT) / 100);
+  }
 #if WHEEL_SLEW_STEP
   /* ★R82（2026-10-08）【最后一级斜率限制】—— 把"PWM 下限抬升 / NO-STOP-BRAKE 钳位 / 环路输出跳变"
      这些【台阶】全部抹平 ⇒ 电机命令每拍最多变 WHEEL_SLEW_STEP ⇒ 转弯连续、不再一抽一抽 ✓。
