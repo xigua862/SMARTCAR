@@ -1333,6 +1333,7 @@ void line_follow_control(int16_t base)
   {
     straight_cycles = 0;
     boost_active = 0;                 /* 误差一大立刻回落 */
+    led_mask(0x00u);   /* ★R122：退出提速 ⇒ 熄灭三灯 ✓ */
   }
   if (straight_cycles >= STRAIGHT_BOOST_DELAY)
   {
@@ -1348,6 +1349,7 @@ void line_follow_control(int16_t base)
       sp = tgt;
     }
     boost_active = 1;
+    led_mask(0x07u);   /* ★R122（用户要求）：每次开启提速 ⇒ 同时点亮 3 个信号 LED ✓ */
   }
 #endif
 
