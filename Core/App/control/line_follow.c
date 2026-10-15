@@ -1518,6 +1518,32 @@ void line_follow_control(int16_t base)
      * ========================================================================== */
     uint8_t trig_now = 0u;
 
+    /* ★★★ 2026-10-08（1008-R89）【用户方案的出口判据】★★★
+       语义（用户明确要求）：里程只是【门槛】✓ —— 过了门槛之后，还要【读到异常图案】才右转 ✓；
+       一直正常就继续循迹 ✓（不是"到里程就转"✗）。
+       异常的定义（用户原话）：① 一侧全灭（线只贴传感器排的一边）② 分离段数 > 3。
+       动作：置 trig_now ⇒ 下面现成的 ge_turning 会执行"右转 90°"（IMU 角度闭环 ✓ + 里程/拍数兜底 ✓）
+             ⇒ 转完 ge_fired 锁存 ⇒ 退出葫芦圈逻辑、恢复普通巡线 ✓。
+       ★放在这里（trig_now 声明之后、判据块之前）是【只插入】✓，不动任何原有代码 ✓。
+       ★回退：GOURD_EXIT_TURN_PWM 设 0，或 GOURD_EXIT_CALIB_ONLY 设 1。 */
+    if ((trig_now == 0u) && (odom_distance_mm() >= (int32_t)GOURD_EXIT_FROM_MM))
+    {
+      uint8_t ex_raw  = (uint8_t)(r.raw & 0xFFu);
+      uint8_t ex_blob = 0u;
+      uint8_t ex_pv   = 0u;
+      uint8_t ex_i;
+      for (ex_i = 0u; ex_i < 8u; ex_i++)
+      {
+        uint8_t ex_b = (uint8_t)((ex_raw >> ex_i) & 1u);
+        if ((ex_b != 0u) && (ex_pv == 0u)) { ex_blob++; }
+        ex_pv = ex_b;
+      }
+      if ((((ex_raw & 0x03u) == 0u) || ((ex_raw & 0xC0u) == 0u)) || (ex_blob >= 4u))
+      {
+        trig_now = 3u;
+      }
+    }
+
     if ((ge_cool == 0u) && (ge_turning == 0u) && (!ge_fired))
     {
 #if GOURD_EXIT_USE_PATTERN
