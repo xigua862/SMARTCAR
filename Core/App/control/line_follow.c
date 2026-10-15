@@ -182,7 +182,6 @@ static pid_t spd_pid[2];   /* 左右轮速度环(编码器闭环) */
 static uint16_t s_ex_tmr  = 0u;   /* ★R91：出口右转剩余拍数（>0 = 正在右转）*/
 static uint8_t  s_ex_done = 0u;   /* ★R91：出口右转是否已完成（一趟只做一次）*/
 static int32_t  s_ex_adv  = -1;   /* ★R102：进入"前进一小段"时的里程（-1 = 还没进入 ✓）*/
-static uint16_t s_ex_adv_fr = 0u;   /* ★R114：前进阶段的拍数（兜底用 ✓）*/
 static uint8_t  s_fin_state = 0u;   /* ★R108：终点状态（0=未触发 1=前进中 2=已停车 ✓）*/
 static uint16_t s_fin_fr    = 0u;   /* ★R108：终点"再前进"已过的拍数 */
 static int16_t s_slew_m1 = 0;   /* ★R82：上一拍最终输给左轮的 PWM（斜率限制用）*/
@@ -452,7 +451,6 @@ typedef struct {
 #define CAND_MAX 40
 static cand_t   s_cand[CAND_MAX];
 static uint16_t s_cand_n = 0u;
-static int32_t  s_cand_last_od = -1000;   /* ★R116：上一条候选的里程（按距离去重 ✓）*/
 #endif
 
 #if USE_BRANCH_EDGE
@@ -510,10 +508,7 @@ void line_follow_control(int16_t base)
          ② 走够了 ⇒ 才启用转向 ✓。（前进期间不 return ⇒ 控制完全交给正常巡线 ⇒ 零干预 ✓） */
       if ((s_ex_adv >= 0) && (EXIT_TURN_MS > 0u))
       {
-        s_ex_adv_fr++;
-        /* ★R114：距离到 ✓ 或 兜底时间到 ✓ ⇒ 都开始转向（防止"里程涨不上去"导致永远不转 ✗）*/
-        if (((odom_distance_mm() - s_ex_adv) >= (int32_t)EXIT_ADVANCE_MM) ||
-            ((EXIT_ADVANCE_MS > 0u) && (s_ex_adv_fr >= (uint16_t)((EXIT_ADVANCE_MS + 9u) / 10u))))
+        if ((odom_distance_mm() - s_ex_adv) >= (int32_t)EXIT_ADVANCE_MM)
         {
           s_ex_tmr = (uint16_t)((EXIT_TURN_MS + 9u) / 10u);   /* 走够了 ⇒ 开始右转 ✓ */
         }
@@ -536,7 +531,6 @@ void line_follow_control(int16_t base)
         if (ex_lit >= (uint8_t)EXIT_ANOM_LIT_MIN)
         {
           s_ex_adv = odom_distance_mm();   /* ★R102：只记住起点 ⇒ 先往前走一段（不马上转 ✓）*/
-          s_ex_adv_fr = 0u;              /* ★R114：兜底计时归零 ✓ */
         }
       }
     }
@@ -916,13 +910,7 @@ void line_follow_control(int16_t base)
       /* ★R100：加【和接管同一个闸门】（s_gourd_armed ✓）—— 否则起步阶段的斑马线/起跑线会把 40 条刷满 ✗
          （实测：上一趟头 60mm 就写了 25 条 ⇒ 表只到 11.4m ⇒ 出口那一段永远看不到 ✗）。
          圈外一条不记 ✓ ⇒ 40 条足够覆盖整圈 + 出口 ✓✓。 */
-      /* ★R116【修葫芦圈的第一步：让日志能看见"单团"的切点】
-         实测：两处切点（约 11770~12010 与 12670~13090）【一条候选都没有】✗
-         ⇒ 因为原来只记"团数 ≥ 2"✗，而那两处是【单团】⇒ 我们对它一无所知。
-         改成：团数 ≥ 2 【或】亮路数 ≥ 4 都算候选 ✓；并按【距离 ≥150mm】去重 ✓ ⇒ 40 条够覆盖整圈 ✓。 */
-      if ((s_gourd_armed != 0u) && (s_cand_n < (uint16_t)CAND_MAX) &&
-          ((nblob >= 2u) || (cnt >= 4u)) &&
-          ((odom_distance_mm() - s_cand_last_od) >= 150))
+      if ((s_gourd_armed != 0u) && (nblob >= 2u) && (s_be_flip_done == 0u) && (s_cand_n < (uint16_t)CAND_MAX))
       {
         s_cand[s_cand_n].od  = odom_distance_mm();
         s_cand[s_cand_n].raw = (uint8_t)(r.raw & 0xFFu);
@@ -931,7 +919,6 @@ void line_follow_control(int16_t base)
         s_cand[s_cand_n].act = cnt;
         s_cand[s_cand_n].acc = 0u;
         s_cand_n++;
-        s_cand_last_od = s_cand[s_cand_n - 1u].od;   /* ★R116：记住去重基准 ✓ */
       }
       /* ★R36：图案消失 ⇒ 重新武装本回合的翻转许可 */
       if (s_be_twoblob == 0u) { s_be_flip_done = 0u; }
