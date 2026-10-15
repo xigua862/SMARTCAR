@@ -951,7 +951,11 @@ void line_follow_control(int16_t base)
       }
       if ((gate != 0u) && ((cnt <= (uint8_t)CROSS_ACTIVE_MAX) || (wide_ok != 0u)) &&
           ((nblob >= 2u) || ((nblob == 1u) && (cnt >= (uint8_t)BRANCH_EDGE_MIN_ACT)) ||
-           (nblob1k >= 2u) || ((nblob1k == 1u) && (cnt1k >= (uint8_t)BRANCH_EDGE_MIN_ACT)) ||
+           /* ★R113【真凶】1kHz 那条支路必须加前提：当前帧至少亮 3 路 ✓
+              —— 实测证据：台账第3条 OD=11953 是被这条支路放行的 ✗（当期位图 00110000 = 单团、只亮 2 路 ✗），
+              它多翻了一格相位 ⇒ 选边变成 L R L L R ⇒ 后面全反 ⇒ 第 7 个切点失败 ✗✓。
+              加"当前帧 ≥3 路亮"后，这种"极窄单团"不再能借 1kHz 蒙混过关 ✓。 */
+           ((nblob1k >= 2u) && (cnt >= 3u)) || ((nblob1k == 1u) && (cnt1k >= (uint8_t)BRANCH_EDGE_MIN_ACT) && (cnt >= 3u)) ||
            (wide_ok != 0u)))
       {
         if (s_be_conf < 255u) s_be_conf++;
