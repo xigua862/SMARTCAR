@@ -470,13 +470,16 @@ void line_follow_control(int16_t base)
         line_reading_t exr = line_read();
         uint8_t ex_raw  = (uint8_t)(exr.raw & 0xFFu);
         uint8_t ex_blob = 0u, ex_pv = 0u, ex_i;
+        uint8_t ex_lit  = 0u;   /* ★R97：亮起的路数（用户说的"灭"的数量 ✓）*/
         for (ex_i = 0u; ex_i < 8u; ex_i++)
         {
           uint8_t ex_b = (uint8_t)((ex_raw >> ex_i) & 1u);
           if ((ex_b != 0u) && (ex_pv == 0u)) { ex_blob++; }
+          if (ex_b != 0u) { ex_lit++; }
           ex_pv = ex_b;
         }
-        if ((((ex_raw & 0x03u) == 0u) || ((ex_raw & 0xC0u) == 0u)) || (ex_blob >= 4u))
+        /* ★R97（用户新定义）：异常 = 【亮起的路数 > 4】✓（统一规定；出口那片宽图案正好满足 ✓）*/
+        if (ex_lit > 4u)
         {
           s_ex_tmr = (uint16_t)((EXIT_TURN_MS + 9u) / 10u);   /* 10ms/拍 ✓ */
         }
