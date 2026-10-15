@@ -182,6 +182,7 @@ static pid_t spd_pid[2];   /* 左右轮速度环(编码器闭环) */
 static uint16_t s_ex_tmr  = 0u;   /* ★R91：出口右转剩余拍数（>0 = 正在右转）*/
 static uint8_t  s_ex_done = 0u;   /* ★R91：出口右转是否已完成（一趟只做一次）*/
 static int32_t  s_ex_adv  = -1;   /* ★R102：进入"前进一小段"时的里程（-1 = 还没进入 ✓）*/
+static uint16_t s_ex_adv_fr = 0u;   /* ★R114：前进阶段的拍数（兜底用 ✓）*/
 static uint8_t  s_fin_state = 0u;   /* ★R108：终点状态（0=未触发 1=前进中 2=已停车 ✓）*/
 static uint16_t s_fin_fr    = 0u;   /* ★R108：终点"再前进"已过的拍数 */
 static int16_t s_slew_m1 = 0;   /* ★R82：上一拍最终输给左轮的 PWM（斜率限制用）*/
@@ -508,7 +509,10 @@ void line_follow_control(int16_t base)
          ② 走够了 ⇒ 才启用转向 ✓。（前进期间不 return ⇒ 控制完全交给正常巡线 ⇒ 零干预 ✓） */
       if ((s_ex_adv >= 0) && (EXIT_TURN_MS > 0u))
       {
-        if ((odom_distance_mm() - s_ex_adv) >= (int32_t)EXIT_ADVANCE_MM)
+        s_ex_adv_fr++;
+        /* ★R114：距离到 ✓ 或 兜底时间到 ✓ ⇒ 都开始转向（防止"里程涨不上去"导致永远不转 ✗）*/
+        if (((odom_distance_mm() - s_ex_adv) >= (int32_t)EXIT_ADVANCE_MM) ||
+            ((EXIT_ADVANCE_MS > 0u) && (s_ex_adv_fr >= (uint16_t)((EXIT_ADVANCE_MS + 9u) / 10u))))
         {
           s_ex_tmr = (uint16_t)((EXIT_TURN_MS + 9u) / 10u);   /* 走够了 ⇒ 开始右转 ✓ */
         }
@@ -531,6 +535,7 @@ void line_follow_control(int16_t base)
         if (ex_lit >= (uint8_t)EXIT_ANOM_LIT_MIN)
         {
           s_ex_adv = odom_distance_mm();   /* ★R102：只记住起点 ⇒ 先往前走一段（不马上转 ✓）*/
+          s_ex_adv_fr = 0u;              /* ★R114：兜底计时归零 ✓ */
         }
       }
     }
