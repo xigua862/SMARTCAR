@@ -132,6 +132,9 @@ static uint16_t g7_count   = 0;   /* 最右一路(bit7)累计触发次数（上�
 static uint8_t  s_g7_phase = 0u;   /* ★R59：第7个切点专用动作的阶段（0=未开始 1=停车中 2=左转中 3=已完成）*/
 static uint16_t s_g7_fr    = 0u;   /* ★R59：当前阶段已过的拍数（10ms/拍）*/
 static int32_t  s_g7_last_od = 0;  /* ★R62：上一拍的里程（用于检测"被顶住"）*/
+static uint8_t  s_g7p_seen2  = 0u;  /* ★R72：已识别6个之后，是否见过"两坨" */
+static uint16_t s_g7p_tmr    = 0u;  /* ★R72：左转剩余拍数（>0 = 正在做第7点的左转）*/
+static uint8_t  s_g7p_done   = 0u;  /* ★R72：第7点是否已判过（只做一次）*/
 static uint8_t  g7_prev    = 0;   /* 上一拍 bit7 电平（边沿检测用） */
 static uint8_t  g7_lock    = 0;   /* 计数锁：>0 时不许再计（防抖 / 防一次点亮算多次） */
 static uint8_t  g7_waitmsg = 0;   /* "数够但位置不对"只打印一次 */
@@ -450,6 +453,43 @@ void line_follow_control(int16_t base)
     uint8_t  lit = 0u;
     int32_t  od  = odom_distance_mm();
     for (ia = 0u; ia < (uint8_t)LINE_CHANNELS; ia++) { if (((ra.raw >> ia) & 1u) != 0u) { lit++; } }
+    /* ★R72：顺便数"团数"（连续 1 的段数）—— 判"两坨 → 一坨"用 */
+    uint8_t g7nb = 0u;
+    uint8_t g7pv = 0u;
+    for (ia = 0u; ia < (uint8_t)LINE_CHANNELS; ia++)
+    {
+      uint8_t g7b = (uint8_t)((ra.raw >> ia) & 1u);
+      if ((g7b != 0u) && (g7pv == 0u)) { g7nb++; }
+      g7pv = g7b;
+    }
+    /* ★★★ R72（用户方案）【已识别 6 个之后，"两坨 → 一坨" = 第 7 个节点】★★★
+       用图案的【变化顺序】判定（歪斜不会改变"先两坨、后并拢"这个顺序 ✓），比单帧形状稳。
+       命中后给一个"轻微左转"（G7P_TURN_FRAMES 拍），顺着左边那条线出去 ✓。只做一次 ✓。 */
+    if (G7P_EN != 0u)
+    {
+      if ((s_g7p_done == 0u) && (s_be_log_n >= (uint16_t)G7P_AFTER_N))
+      {
+        if (g7nb >= 2u) { s_g7p_seen2 = 1u; }
+        if ((s_g7p_seen2 != 0u) && (g7nb == 1u) && (lit >= 1u))
+        {
+          s_g7p_done = 1u;
+          s_g7p_tmr  = (uint16_t)G7P_TURN_FRAMES;
+        }
+      }
+      if ((s_g7p_tmr > 0u) && (G7P_TURN_FRAMES > 0u))
+      {
+        int16_t pa = (int16_t)(G7_MAN_SPEED - G7P_TURN_PWM);
+        int16_t pb = (int16_t)(G7_MAN_SPEED + G7P_TURN_PWM);
+        if (pa >  99) { pa =  99; }  if (pa < -99) { pa = -99; }
+        if (pb >  99) { pb =  99; }  if (pb < -99) { pb = -99; }
+        motor_set_differential(pa, pb);
+        last_error  = -3;
+        lost_cycles = 0;
+        line_lost   = 0;
+        s_g7p_tmr--;
+        return;
+      }
+    }
     if ((G7_DIAG_STOP_N > 0u) && (s_be_log_n >= (uint16_t)G7_DIAG_STOP_N))   /* 诊断停车 */
     {
       motor_set_differential(0, 0);
@@ -1752,6 +1792,34 @@ void line_follow_control(int16_t base)
        —— 用与出圈右转相同的写法：直接给电机 + return（绕开 PD 与 PWM 下限，否则"停车"会被抬到 20 ✗）。 */
     /* ★R63（用户要求，诊断用）：识别到第 G7_DIAG_STOP_N 个切点 ⇒ 立刻停车（两轮 0 + return）
        —— 台账条数 s_be_log_n 就是"已经识别到几个切点" ✓ */
+    /* ★★★ R72（用户方案）【已识别 6 个之后，"两坨 → 一坨" = 第 7 个节点】★★★
+       用图案的【变化顺序】判定（歪斜不会改变"先两坨、后并拢"这个顺序 ✓），比单帧形状稳。
+       命中后给一个"轻微左转"（G7P_TURN_FRAMES 拍），顺着左边那条线出去 ✓。只做一次 ✓。 */
+    if (G7P_EN != 0u)
+    {
+      if ((s_g7p_done == 0u) && (s_be_log_n >= (uint16_t)G7P_AFTER_N))
+      {
+        if (g7nb >= 2u) { s_g7p_seen2 = 1u; }
+        if ((s_g7p_seen2 != 0u) && (g7nb == 1u) && (lit >= 1u))
+        {
+          s_g7p_done = 1u;
+          s_g7p_tmr  = (uint16_t)G7P_TURN_FRAMES;
+        }
+      }
+      if ((s_g7p_tmr > 0u) && (G7P_TURN_FRAMES > 0u))
+      {
+        int16_t pa = (int16_t)(G7_MAN_SPEED - G7P_TURN_PWM);
+        int16_t pb = (int16_t)(G7_MAN_SPEED + G7P_TURN_PWM);
+        if (pa >  99) { pa =  99; }  if (pa < -99) { pa = -99; }
+        if (pb >  99) { pb =  99; }  if (pb < -99) { pb = -99; }
+        motor_set_differential(pa, pb);
+        last_error  = -3;
+        lost_cycles = 0;
+        line_lost   = 0;
+        s_g7p_tmr--;
+        return;
+      }
+    }
     if ((G7_DIAG_STOP_N > 0u) && (s_be_log_n >= (uint16_t)G7_DIAG_STOP_N))
     {
       motor_set_differential(0, 0);
