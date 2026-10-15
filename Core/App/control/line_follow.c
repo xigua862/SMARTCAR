@@ -179,6 +179,8 @@ static float s_corr_trim = 0.0f;
 
 #if USE_SPEED_LOOP
 static pid_t spd_pid[2];   /* 左右轮速度环(编码器闭环) */
+static uint16_t s_ex_tmr  = 0u;   /* ★R91：出口右转剩余拍数（>0 = 正在右转）*/
+static uint8_t  s_ex_done = 0u;   /* ★R91：出口右转是否已完成（一趟只做一次）*/
 static int16_t s_slew_m1 = 0;   /* ★R82：上一拍最终输给左轮的 PWM（斜率限制用）*/
 static int16_t s_slew_m2 = 0;   /* ★R82：右轮 */
 #if SPD_DEAD_FB_GUARD
@@ -440,7 +442,47 @@ static uint8_t s_be_flip_done    = 0u;   /* ★R36：本回合是否已翻过（
 #endif
 
 void line_follow_control(int16_t base)
-{
+{
+  /* ★★★ 2026-10-08（1008-R91）【用户要的出口右转：独立小模块】★★★
+     语义：里程 ≥ GOURD_EXIT_FROM_MM（门槛 ✓）之后，一旦读到"异常图案" ⇒ 直接右转；
+           其他地方一律不动 ✓（不碰 CALIB_ONLY ✗、不碰出口旧判据 ✗、不碰葫芦圈里程 ✗）。
+     异常 = ① 一侧全灭（最左两路都黑 或 最右两路都黑）② 分离段数 ≥ 4。
+     转向 = 定时右转（EXIT_TURN_MS）✓，剩余偏差交给巡线 PID ✓。放在函数最前面 ⇒ 谁都抢不走 ✓。 */
+  {
+    if (s_ex_done == 0u)
+    {
+      if (s_ex_tmr > 0u)
+      {
+        int16_t exa = (int16_t)(EXIT_TURN_BASE + EXIT_TURN_PWM);
+        int16_t exb = (int16_t)(EXIT_TURN_BASE - EXIT_TURN_PWM);
+        if (exa >  99) { exa =  99; }  if (exa < -99) { exa = -99; }
+        if (exb >  99) { exb =  99; }  if (exb < -99) { exb = -99; }
+        motor_set_differential(exa, exb);   /* 左快右慢 = 右转 ✓ */
+        last_error = 3;
+        lost_cycles = 0;
+        line_lost   = 0;
+        s_ex_tmr--;
+        if (s_ex_tmr == 0u) { s_ex_done = 1u; }   /* 转完 ⇒ 恢复普通巡线 ✓ */
+        return;
+      }
+      if ((EXIT_TURN_MS > 0u) && (odom_distance_mm() >= (int32_t)GOURD_EXIT_FROM_MM))
+      {
+        line_reading_t exr = line_read();
+        uint8_t ex_raw  = (uint8_t)(exr.raw & 0xFFu);
+        uint8_t ex_blob = 0u, ex_pv = 0u, ex_i;
+        for (ex_i = 0u; ex_i < 8u; ex_i++)
+        {
+          uint8_t ex_b = (uint8_t)((ex_raw >> ex_i) & 1u);
+          if ((ex_b != 0u) && (ex_pv == 0u)) { ex_blob++; }
+          ex_pv = ex_b;
+        }
+        if ((((ex_raw & 0x03u) == 0u) || ((ex_raw & 0xC0u) == 0u)) || (ex_blob >= 4u))
+        {
+          s_ex_tmr = (uint16_t)((EXIT_TURN_MS + 9u) / 10u);   /* 10ms/拍 ✓ */
+        }
+      }
+    }
+  }
   line_reading_t r = line_read();
   int8_t e = r.error;
 
