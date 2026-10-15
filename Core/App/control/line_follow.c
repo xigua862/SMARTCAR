@@ -181,8 +181,6 @@ static float s_corr_trim = 0.0f;
 static pid_t spd_pid[2];   /* 左右轮速度环(编码器闭环) */
 static uint16_t s_ex_tmr  = 0u;   /* ★R91：出口右转剩余拍数（>0 = 正在右转）*/
 static uint8_t  s_ex_done = 0u;   /* ★R91：出口右转是否已完成（一趟只做一次）*/
-static uint8_t  s_ex_cfrm = 0u;   /* ★R93：异常图案连续确认计数（治"太敏感"✓）*/
-static int32_t  s_ex_adv  = -1;   /* ★R93：进入"前进一小段"时的里程（-1 = 未进入）*/
 static int16_t s_slew_m1 = 0;   /* ★R82：上一拍最终输给左轮的 PWM（斜率限制用）*/
 static int16_t s_slew_m2 = 0;   /* ★R82：右轮 */
 #if SPD_DEAD_FB_GUARD
@@ -467,17 +465,7 @@ void line_follow_control(int16_t base)
         if (s_ex_tmr == 0u) { s_ex_done = 1u; }   /* 转完 ⇒ 恢复普通巡线 ✓ */
         return;
       }
-      /* ★R93【前进一小段阶段】：检测到异常后不马上转 ✓，先按正常循线往前走 EXIT_ADVANCE_MM ✓，
-         走够了再进入右转阶段（用户要求："稍微往前走一丁点然后再转出去"✓）。
-         ★本阶段【不 return】⇒ 让车照常循线前进 ✓（不干预任何控制 ✓）。 */
-      if (s_ex_adv >= 0)
-      {
-        if ((odom_distance_mm() - s_ex_adv) >= (int32_t)EXIT_ADVANCE_MM)
-        {
-          s_ex_tmr = (uint16_t)((EXIT_TURN_MS + 9u) / 10u);   /* 走够了 ⇒ 开始右转 ✓ */
-        }
-      }
-      else if ((EXIT_TURN_MS > 0u) && (odom_distance_mm() >= (int32_t)GOURD_EXIT_FROM_MM))
+      if ((EXIT_TURN_MS > 0u) && (odom_distance_mm() >= (int32_t)GOURD_EXIT_FROM_MM))
       {
         line_reading_t exr = line_read();
         uint8_t ex_raw  = (uint8_t)(exr.raw & 0xFFu);
@@ -488,18 +476,9 @@ void line_follow_control(int16_t base)
           if ((ex_b != 0u) && (ex_pv == 0u)) { ex_blob++; }
           ex_pv = ex_b;
         }
-        /* ★R93：异常要【连续 EXIT_CONFIRM_FRAMES 拍】才算数（治"太敏感"✓） */
         if ((((ex_raw & 0x03u) == 0u) || ((ex_raw & 0xC0u) == 0u)) || (ex_blob >= 4u))
         {
-          if (s_ex_cfrm < 200u) { s_ex_cfrm++; }
-        }
-        else
-        {
-          s_ex_cfrm = 0u;
-        }
-        if ((EXIT_CONFIRM_FRAMES > 0u) && (s_ex_cfrm >= (uint8_t)EXIT_CONFIRM_FRAMES))
-        {
-          s_ex_adv = odom_distance_mm();   /* 进入"前进一小段"✓ */
+          s_ex_tmr = (uint16_t)((EXIT_TURN_MS + 9u) / 10u);   /* 10ms/拍 ✓ */
         }
       }
     }
