@@ -130,6 +130,9 @@ static int8_t   gourd_dir    = 1;      /* 进相切点前的误差方向 */
    就是 #if 范围不一致造成的，这里一律全声明、只在真正使用的地方 #if。 */
 static uint16_t g7_count   = 0;   /* 最右一路(bit7)累计触发次数（上升沿计数） */
 static uint8_t  s_g7_phase = 0u;   /* ★R59：第7个切点专用动作的阶段（0=未开始 1=停车中 2=左转中 3=已完成）*/
+static uint8_t  s_rec_ir[G7_REC_N];   /* ★R72：逐拍位图记录（只读诊断）*/
+static int16_t  s_rec_od[G7_REC_N];   /* ★R72：对应里程（相对 G7_REC_FROM_MM 的 mm）*/
+static uint16_t s_rec_n = 0u;         /* ★R72：已记录条数（到 G7_REC_N 就不再记 ✓）*/
 static uint16_t s_g7_fr    = 0u;   /* ★R59：当前阶段已过的拍数（10ms/拍）*/
 static int32_t  s_g7_last_od = 0;  /* ★R62：上一拍的里程（用于检测"被顶住"）*/
 static uint8_t  g7_prev    = 0;   /* 上一拍 bit7 电平（边沿检测用） */
@@ -450,6 +453,13 @@ void line_follow_control(int16_t base)
     uint8_t  lit = 0u;
     int32_t  od  = odom_distance_mm();
     for (ia = 0u; ia < (uint8_t)LINE_CHANNELS; ia++) { if (((ra.raw >> ia) & 1u) != 0u) { lit++; } }
+    /* ★R72（只记录、不控制）：出口段的逐拍位图 —— 用来查"第 7 个节点歪一点就认不出"到底长什么样 */
+    if ((s_rec_n < (uint16_t)G7_REC_N) && (od >= (int32_t)G7_REC_FROM_MM) && (od <= (int32_t)G7_REC_TO_MM))
+    {
+      s_rec_ir[s_rec_n] = (uint8_t)(ra.raw & 0xFFu);
+      s_rec_od[s_rec_n] = (int16_t)(od - (int32_t)G7_REC_FROM_MM);
+      s_rec_n++;
+    }
     if ((G7_DIAG_STOP_N > 0u) && (s_be_log_n >= (uint16_t)G7_DIAG_STOP_N))   /* 诊断停车 */
     {
       motor_set_differential(0, 0);
