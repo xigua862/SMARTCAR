@@ -1483,6 +1483,34 @@ void line_follow_control(int16_t base)
 #endif
 #endif /* GOURD_EXIT_USE_PATTERN */
 
+      /* ★★★ 2026-10-08（1008-R85）【用户方案的出口判据】★★★
+         语义（用户明确要求）：【里程只是门槛】✓ —— 过了门槛之后，还要【读到异常图案】才右转 ✓；
+         一直正常就继续循迹 ✓（不是"到里程就转"✗，那正是老判据③的毛病）。
+         异常图案的定义（用户原话）：① 一侧全灭（线只贴传感器排的一边）② 分离段数 > 3（如 10101001 ✓）。
+         ★实测支持：用户停车点 13059 处的图案正是 10101001（4 段分离）✓。
+         ★触发后走的是现成的 ge_turning 状态机 ✓（自带 IMU 角度闭环 90° ✓ + 里程/拍数兜底 ✓）。 */
+      if (trig_now == 0u)
+      {
+        int32_t ex_od = odom_distance_mm();
+        if (ex_od >= (int32_t)GOURD_EXIT_FROM_MM)
+        {
+          uint8_t ex_raw = (uint8_t)(r.raw & 0xFFu);
+          uint8_t ex_lit = 0u, ex_blob = 0u, ex_pv = 0u, ex_i;
+          for (ex_i = 0u; ex_i < 8u; ex_i++)
+          {
+            uint8_t ex_b = (uint8_t)((ex_raw >> ex_i) & 1u);
+            if (ex_b != 0u) { ex_lit++; }
+            if ((ex_b != 0u) && (ex_pv == 0u)) { ex_blob++; }
+            ex_pv = ex_b;
+          }
+          /* ① 一侧全灭（最左两路都黑 或 最右两路都黑）  ② 分离段数 ≥ 4 */
+          if ((((ex_raw & 0x03u) == 0u) || ((ex_raw & 0xC0u) == 0u)) || (ex_blob >= 4u))
+          {
+            trig_now = 3u;
+          }
+        }
+      }
+
 #if USE_IMU
     /* IMU 在 + 已标定 → 才允许用角度闭环 */
     uint8_t yaw_ok = (uint8_t)((GOURD_EXIT_USE_YAW && imu_yaw_is_valid()) ? 1u : 0u);
@@ -1535,6 +1563,34 @@ void line_follow_control(int16_t base)
       }
       if (ge_exit_cnt >= (uint8_t)GOURD_EXIT_CONFIRM) trig_now = 1u;
 #endif /* GOURD_EXIT_USE_PATTERN */
+
+      /* ★★★ 2026-10-08（1008-R85）【用户方案的出口判据】★★★
+         语义（用户明确要求）：【里程只是门槛】✓ —— 过了门槛之后，还要【读到异常图案】才右转 ✓；
+         一直正常就继续循迹 ✓（不是"到里程就转"✗，那正是老判据③的毛病）。
+         异常图案的定义（用户原话）：① 一侧全灭（线只贴传感器排的一边）② 分离段数 > 3（如 10101001 ✓）。
+         ★实测支持：用户停车点 13059 处的图案正是 10101001（4 段分离）✓。
+         ★触发后走的是现成的 ge_turning 状态机 ✓（自带 IMU 角度闭环 90° ✓ + 里程/拍数兜底 ✓）。 */
+      if (trig_now == 0u)
+      {
+        int32_t ex_od = odom_distance_mm();
+        if (ex_od >= (int32_t)GOURD_EXIT_FROM_MM)
+        {
+          uint8_t ex_raw = (uint8_t)(r.raw & 0xFFu);
+          uint8_t ex_lit = 0u, ex_blob = 0u, ex_pv = 0u, ex_i;
+          for (ex_i = 0u; ex_i < 8u; ex_i++)
+          {
+            uint8_t ex_b = (uint8_t)((ex_raw >> ex_i) & 1u);
+            if (ex_b != 0u) { ex_lit++; }
+            if ((ex_b != 0u) && (ex_pv == 0u)) { ex_blob++; }
+            ex_pv = ex_b;
+          }
+          /* ① 一侧全灭（最左两路都黑 或 最右两路都黑）  ② 分离段数 ≥ 4 */
+          if ((((ex_raw & 0x03u) == 0u) || ((ex_raw & 0xC0u) == 0u)) || (ex_blob >= 4u))
+          {
+            trig_now = 3u;
+          }
+        }
+      }
 
 #if GOURD_EXIT_ON_LOST
       /* ---- 判据②：圈内持续丢线 = 出口兜底 ----
