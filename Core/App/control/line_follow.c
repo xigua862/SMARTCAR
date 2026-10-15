@@ -179,6 +179,8 @@ static float s_corr_trim = 0.0f;
 
 #if USE_SPEED_LOOP
 static pid_t spd_pid[2];   /* 左右轮速度环(编码器闭环) */
+static int16_t s_slew_m1 = 0;   /* ★R82：上一拍最终输给左轮的 PWM（斜率限制用）*/
+static int16_t s_slew_m2 = 0;   /* ★R82：右轮 */
 #if SPD_DEAD_FB_GUARD
 /* ★2026-10-08【单轮测速断线】状态（判据与理由见 app_config.h 的 SPD_DEAD_FB_*）*/
 static uint16_t s_fb_dead_cnt[2] = {0, 0};   /* 漏桶计数：满足 +1、不满足 −1 */
