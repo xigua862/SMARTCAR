@@ -1695,52 +1695,6 @@ void line_follow_control(int16_t base)
 
     /* ★★★ R59（用户要求：第 7 个切点停一下再转）★★★ 说明与取值见 app_config.h 的 G7_STOP_* / G7_TURN_*
        —— 用与出圈右转相同的写法：直接给电机 + return（绕开 PD 与 PWM 下限，否则"停车"会被抬到 20 ✗）。 */
-    if (s_g7_phase < 3u)   /* ★R62：不再要求闸门（闸门为 0 时整段会被跳过 ✗）；只靠"里程 + 顶住"判定 */
-    {
-      int32_t g7od = odom_distance_mm();
-      if (s_g7_phase == 0u)
-      {
-        /* ★R62：改成"检测被顶住"—— 不再用绝对里程窗口 */
-        /* ★R67：图案条件 —— 亮路数 ≥ G7_STALL_MIN_LIT（一大片白）才允许判定顶死 */
-        uint8_t g7lit = 0u;
-        {
-          line_reading_t r2 = line_read();
-          uint8_t i2;
-          for (i2 = 0u; i2 < (uint8_t)LINE_CHANNELS; i2++) { if (((r2.raw >> i2) & 1u) != 0u) { g7lit++; } }
-        }
-        if ((g7od >= (int32_t)G7_STALL_MIN_MM) && (g7lit >= (uint8_t)G7_STALL_MIN_LIT) &&
-            ((g7od - s_g7_last_od) < (int32_t)G7_STALL_MM))
-        {
-          if (s_g7_fr < 60000u) s_g7_fr++;
-        }
-        else
-        {
-          s_g7_fr = 0u;
-        }
-        s_g7_last_od = g7od;
-        if (s_g7_fr >= (uint16_t)G7_STALL_FRAMES) { s_g7_phase = 1u; s_g7_fr = 0u; }
-      }
-      if ((s_g7_phase == 1u) && ((G7_STOP_MS > 0u) || (G7_TURN_MS > 0u)))
-      {
-        motor_set_differential(0, 0);          /* ① 停车 */
-        s_g7_fr++;
-        if (s_g7_fr >= (uint16_t)((G7_STOP_MS + 9u) / 10u)) { s_g7_phase = 2u; s_g7_fr = 0u; }
-        return;
-      }
-      if (s_g7_phase == 2u)
-      {
-        int16_t a = (int16_t)(sp_curve - G7_MAN_TURN_PWM);   /* 左轮慢 */
-        int16_t b = (int16_t)(sp_curve + G7_MAN_TURN_PWM);   /* 右轮快 = 左转 */
-        if (a >  99) a =  99;  if (a < -99) a = -99;
-        if (b >  99) b =  99;  if (b < -99) b = -99;
-        motor_set_differential(a, b);
-        last_error  = -3;   /* 转完给 PD 一个偏左的起点（左转后的合理朝向）*/
-        lost_cycles = 0;  line_lost = 0;
-        s_g7_fr++;
-        if (s_g7_fr >= (uint16_t)((G7_TURN_MS + 9u) / 10u)) { s_g7_phase = 3u; }
-        return;
-      }
-    }
 
     /* ---- 转的过程中：闭眼给固定差速, 直到"转够" ---- */
     if (ge_turning)
