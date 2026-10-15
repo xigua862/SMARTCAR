@@ -874,7 +874,10 @@ void line_follow_control(int16_t base)
       /* ★R99：改成【每个"两坨"回合只记第一拍】✓（原来每拍都记 ✗ ⇒ 40 条在第一个切点就快满了 ✗）。
          用现成的回合状态 s_be_flip_done：== 0 表示"本回合还没被消费"✓ ⇒ 只在回合首拍记录 ✓。
          ⇒ 一趟下来约 10~20 条 ✓ ⇒ 缓冲区足以覆盖【整趟 + 出口】✓✓。 */
-      if ((nblob >= 2u) && (s_be_flip_done == 0u) && (s_cand_n < (uint16_t)CAND_MAX))
+      /* ★R100：加【和接管同一个闸门】（s_gourd_armed ✓）—— 否则起步阶段的斑马线/起跑线会把 40 条刷满 ✗
+         （实测：上一趟头 60mm 就写了 25 条 ⇒ 表只到 11.4m ⇒ 出口那一段永远看不到 ✗）。
+         圈外一条不记 ✓ ⇒ 40 条足够覆盖整圈 + 出口 ✓✓。 */
+      if ((s_gourd_armed != 0u) && (nblob >= 2u) && (s_be_flip_done == 0u) && (s_cand_n < (uint16_t)CAND_MAX))
       {
         s_cand[s_cand_n].od  = odom_distance_mm();
         s_cand[s_cand_n].raw = (uint8_t)(r.raw & 0xFFu);
