@@ -461,7 +461,8 @@ static uint8_t s_be_flip_done    = 0u;   /* ★R36：本回合是否已翻过（
 #endif
 
 void line_follow_control(int16_t base)
-{
+{
+
   /* ★★★ 2026-10-08（1008-R91）【用户要的出口右转：独立小模块】★★★
      语义：里程 ≥ GOURD_EXIT_FROM_MM（门槛 ✓）之后，一旦读到"异常图案" ⇒ 直接右转；
            其他地方一律不动 ✓（不碰 CALIB_ONLY ✗、不碰出口旧判据 ✗、不碰葫芦圈里程 ✗）。
@@ -2409,6 +2410,16 @@ void line_follow_control(int16_t base)
      （README：RPM ≈ 3.59 × PWM，PWM 70 → ≈250RPM）→
      PID 永远认为"离目标还差 200 多" → 积分顶到上限 → 输出恒为 50。
      换算系数 RPM_PER_PWM_X100 在 app_config.h（标定依据见那里的注释）。 */
+    /* ★R120（B′1）：目标转速不得低于"下限 PWM 能维持的转速"——
+       否则 PID 会去追一个物理上做不到的低转速 ⇒ 输出撞下限 ⇒ 来回跳 ⇒ 一顿一顿 ✓✓
+       （不影响转向大小 ✓：那个速度本来就到不了 ✓，只是不再徒劳对抗 ✓）*/
+    if (USE_TGT_FLOOR_ALIGN != 0u)
+    {
+      if ((WHEEL_PWM_FLOOR > 0) && (m1 >  0) && (m1 <  (int16_t)WHEEL_PWM_FLOOR)) { m1 =  (int16_t)WHEEL_PWM_FLOOR; }
+      if ((WHEEL_PWM_FLOOR > 0) && (m1 <  0) && (m1 > -(int16_t)WHEEL_PWM_FLOOR)) { m1 = -(int16_t)WHEEL_PWM_FLOOR; }
+      if ((WHEEL_PWM_FLOOR > 0) && (m2 >  0) && (m2 <  (int16_t)WHEEL_PWM_FLOOR)) { m2 =  (int16_t)WHEEL_PWM_FLOOR; }
+      if ((WHEEL_PWM_FLOOR > 0) && (m2 <  0) && (m2 > -(int16_t)WHEEL_PWM_FLOOR)) { m2 = -(int16_t)WHEEL_PWM_FLOOR; }
+    }
   tgt_rpm[0] = (float)((int32_t)m1 * (int32_t)RPM_PER_PWM_X100) / 100.0f;
   tgt_rpm[1] = (float)((int32_t)m2 * (int32_t)RPM_PER_PWM_X100) / 100.0f;
 #if SPD_USE_FEEDFORWARD
@@ -2676,7 +2687,8 @@ void line_follow_control(int16_t base)
 #endif
 
   /* ★2026-09-26 诊断：记下"真正下发给电机的 PWM"，遥测 PWM=l/r 打出来。
-     放在 motor_set_differential 之前，保证与电机收到的值完全一致。 */
+     放在 motor_set_differential 之前，保证与电机收到的值完全一致。 */
+
   /* ★R101（用户要求）：到达右转里程后【减速 80%】✓，出圈（s_ex_done=1）后自动恢复 ✓
      作用在最终两轮命令上 ⇒ 无论速度环如何调都有效 ✓；缩放是两轮同比例 ⇒ 保持转向关系 ✓。 */
   if ((EXIT_SLOW_PCT > 0u) && (EXIT_SLOW_PCT < 100u) && (s_ex_done == 0u) &&
