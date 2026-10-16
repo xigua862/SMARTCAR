@@ -84,6 +84,7 @@ static uint8_t  wide_armed   = 1;  /* 本段宽图案"可否计数"：★在段�
    所以声明和复位都跟着开关走（#if 范围必须一致，这是本项目踩过的老坑）。 */
 #if USE_STRAIGHT_BOOST
 static uint16_t straight_cycles = 0;   /* 连续"直线"拍数 */
+static uint16_t boost_cool      = 0;   /* ★2026-10-16：提速释放后的冷却拍数（>0 ⇒ 不许重新进入）*/
 #endif
 static uint8_t  boost_active    = 0;   /* 1 = 已进入提速档（accessor 会读, 所以不受开关影响） */
 
@@ -1339,32 +1340,62 @@ void line_follow_control(int16_t base)
 
   /* ---- ★直线提速：连续"直线"够久 → 直接冲到 99（慢起快落）---- */
 #if USE_STRAIGHT_BOOST
-  if ((r.active > 0u) && (e <= STRAIGHT_BOOST_ERR_MAX) && (e >= -STRAIGHT_BOOST_ERR_MAX)
-      && (!on_cross) && (!wide_long) && (!line_lost))
+  /* ★2026-10-16【迟滞 + 释放冷却】—— 用户 9-24 笔记预登记的 ②③ 条（只动这一个变量）
+     进严：|e| ≤ STRAIGHT_BOOST_ERR_MAX(2) 连续 150 拍
+     出宽：已提速时 |e| > STRAIGHT_BOOST_EXIT_ERR(4) 才退（中间 3 是迟滞带）
+     出后：冷却 STRAIGHT_BOOST_COOLDOWN(50 拍=0.5s) 内不许重新进入 ⇒ 灭掉"冲-慢-冲"打摆
+     其余（150 拍 / 40 / 斜坡 2）与 R121 完全一致；回退 = EXIT_ERR 改 2 且 COOLDOWN 改 0。 */
   {
-    if (straight_cycles < 60000u) straight_cycles++;
-  }
-  else
-  {
-    straight_cycles = 0;
-    boost_active = 0;                 /* 误差一大立刻回落 */
-    led_mask(0x00u);   /* ★R122：退出提速 ⇒ 熄灭三灯 ✓ */
-  }
-  if (straight_cycles >= STRAIGHT_BOOST_DELAY)
-  {
-    /* ★斜坡提速：每拍最多涨 STRAIGHT_BOOST_RAMP，避免瞬跳（原版直接跳 99）*/
-    int16_t tgt = STRAIGHT_BOOST_SPEED;
-    if (sp < tgt)
+    uint8_t boost_ok = (uint8_t)((r.active > 0u) && (!on_cross) && (!wide_long) && (!line_lost));
+
+    if (boost_active)
     {
-      sp = (int16_t)(sp + STRAIGHT_BOOST_RAMP);
-      if (sp > tgt) sp = tgt;
+      if ((!boost_ok) || (e > (int16_t)STRAIGHT_BOOST_EXIT_ERR) || (e < -(int16_t)STRAIGHT_BOOST_EXIT_ERR))
+      {
+        boost_active = 0;
+        straight_cycles = 0;
+        boost_cool = (uint16_t)STRAIGHT_BOOST_COOLDOWN;   /* ★释放后冷却（防立刻再进）*/
+        led_mask(0x00u);   /* ★R122：退出提速 ⇒ 熄灭三灯 ✓ */
+      }
     }
     else
     {
-      sp = tgt;
+      if ((!boost_ok) || (e > (int16_t)STRAIGHT_BOOST_ERR_MAX) || (e < -(int16_t)STRAIGHT_BOOST_ERR_MAX))
+      {
+        straight_cycles = 0;
+        if (boost_cool > 0u) boost_cool--;                /* 冷却随拍流逝 */
+      }
+      else if (boost_cool > 0u)
+      {
+        boost_cool--;
+        straight_cycles = 0;                              /* 冷却期内"看着直"也不许上膛 */
+      }
+      else if (straight_cycles < 60000u)
+      {
+        straight_cycles++;
+      }
+
+      if (straight_cycles >= STRAIGHT_BOOST_DELAY)
+      {
+        boost_active = 1;                                 /* 上膛 ⇒ 下面抬 sp + 亮三灯 */
+      }
     }
-    boost_active = 1;
-    led_mask(0x07u);   /* ★R122（用户要求）：每次开启提速 ⇒ 同时点亮 3 个信号 LED ✓ */
+
+    if (boost_active)
+    {
+      /* ★斜坡提速：每拍最多涨 STRAIGHT_BOOST_RAMP，避免瞬跳（原版直接跳 99）*/
+      int16_t tgt = STRAIGHT_BOOST_SPEED;
+      if (sp < tgt)
+      {
+        sp = (int16_t)(sp + STRAIGHT_BOOST_RAMP);
+        if (sp > tgt) sp = tgt;
+      }
+      else
+      {
+        sp = tgt;
+      }
+      led_mask(0x07u);   /* ★R122（用户要求）：每次开启提速 ⇒ 同时点亮 3 个信号 LED ✓ */
+    }
   }
 #endif
 
@@ -3500,6 +3531,7 @@ void line_follow_init(void)
 #endif
 #if USE_STRAIGHT_BOOST
   straight_cycles = 0;   /* 只在提速开着时才存在（见顶部声明的 #if） */
+  boost_cool      = 0;   /* ★2026-10-16：冷却同进同出 */
 #endif
   boost_active = 0;
   gourd_latch  = 0;
