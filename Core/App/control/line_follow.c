@@ -197,6 +197,13 @@ static uint16_t s_fin_fr    = 0u;   /* ★R108：终点"再前进"已过的拍�
 static uint8_t s_ex_log_seen = 0u;   /* 1 = 已打过"进入出口段"那行 */
 static uint8_t s_ex_log_max  = 0u;   /* 出口段内见过的最大亮路数 */
 #endif
+#if SPD_LOG_EN
+/* ★R165【速度事件日志】的状态（只在 line_follow_control 末尾那个打印块里用；每趟由 rearm 复位）*/
+static int16_t  s_spl_sp  = -1;      /* 上一拍算出来的目标速度 sp（-1 = 本趟还没记过）*/
+static int32_t  s_spl_od  = -100000; /* 上次打印时的 OD（限流：两行间隔 ≥SPD_LOG_MIN_MM）*/
+static uint8_t  s_spl_cap = 0u;      /* 上一拍"50% 减速"是否在压 */
+static uint16_t s_spl_n   = 0u;      /* 本趟已打印行数（上限 SPD_LOG_MAX）*/
+#endif
 #if WHEEL_SLEW_STEP
 /* ★2026-10-16 修 #177-D：这两颗只被下方 #if WHEEL_SLEW_STEP 的斜率限制块用到，
    原来声明在 USE_SPEED_LOOP 里 ⇒ WHEEL_SLEW_STEP=0（R84 已撤）时成为"声明未引用"警告。
@@ -3165,13 +3172,64 @@ void line_follow_control(int16_t base)
      放在 motor_set_differential 之前，保证与电机收到的值完全一致。 */
 
   /* ★R101（用户要求）：到达右转里程后【减速 80%】✓，出圈（s_ex_done=1）后自动恢复 ✓
-     作用在最终两轮命令上 ⇒ 无论速度环如何调都有效 ✓；缩放是两轮同比例 ⇒ 保持转向关系 ✓。 */
+     作用在最终两轮命令上 ⇒ 无论速度环如何调都有效 ✓；缩放是两轮同比例 ⇒ 保持转向关系 ✓。
+     ★★★ 2026-10-16（1016-R165）【补上"距离上限"—— 修一个大 bug】★★★
+     原来的条件只有 `s_ex_done == 0u` ⇒ **出口右转一旦没触发，s_ex_done 永远是 0**，
+     这个 50% 就会从 12844 一直吃到终点 —— 现象就是**过了葫芦之后一路都在刹车**：
+       · 他："葫芦弯道之后建议全程 57"（R157）、"减速[刹车]还是太早"、"改槽③真的一点效果都没有"
+         （50% 的全局压制比槽③ 的 24 档大得多 ⇒ 改槽③当然看不出来）；
+       · 也在 R162 那个"出口没触发"的下游：没触发 ⇒ 不光不右转，还把后半程变成半速。
+     现在：**只在 [GOURD_EXIT_FROM_MM, +EXIT_SLOW_MM] 这一段里生效**（`GOURD_EXIT_SLOW_MM 800` 是当年就留着的量），
+     出口转向成功（`s_ex_done=1`）或**走出这一段**都立刻恢复 ⇒ 不可能再泄漏到后半段。
+     ★回退：EXIT_SLOW_PCT 改 0（整条功能关）。 */
   if ((EXIT_SLOW_PCT > 0u) && (EXIT_SLOW_PCT < 100u) && (s_ex_done == 0u) &&
-      (odom_distance_mm() >= (int32_t)GOURD_EXIT_FROM_MM))
+      (odom_distance_mm() >= (int32_t)GOURD_EXIT_FROM_MM) &&
+      (odom_distance_mm() <  (int32_t)(GOURD_EXIT_FROM_MM + GOURD_EXIT_SLOW_MM)))
   {
     m1 = (int16_t)(((int32_t)m1 * (int32_t)EXIT_SLOW_PCT) / 100);
     m2 = (int16_t)(((int32_t)m2 * (int32_t)EXIT_SLOW_PCT) / 100);
   }
+#if SPD_LOG_EN
+  /* ★★★ 2026-10-16（1016-R165）【速度事件日志】—— 治"改来改去一点效果都没有"★★★
+     为什么要它：这一轮的教训就是**看不见速度到底在哪一拍、因为什么掉的** ⇒ 只能靠猜、来回烧片子。
+     这里**只打印、不改判据**：目标速度 `sp` 跳 ≥SPD_LOG_STEP 档，或者上面那条"50% 减速"生效状态变化时，
+     打一行 `SPD …`（带 OD、当前窗口掩码、50% 是否在压、以及粗原因）。
+     ★限流：同一行间隔 ≥SPD_LOG_MIN_MM(20mm)、每趟最多 SPD_LOG_MAX(40) 行 —— 不会拖慢控制拍。
+     ★每趟起步由 line_follow_gourd_rearm() 复位（行数计数/上次值）。 */
+  {
+    int32_t od_lg = odom_distance_mm();
+    uint8_t cap_lg = (uint8_t)(((EXIT_SLOW_PCT > 0u) && (EXIT_SLOW_PCT < 100u) && (s_ex_done == 0u) &&
+                                (od_lg >= (int32_t)GOURD_EXIT_FROM_MM) &&
+                                (od_lg <  (int32_t)(GOURD_EXIT_FROM_MM + GOURD_EXIT_SLOW_MM))) ? 1u : 0u);
+    int16_t dsp = (int16_t)(sp - s_spl_sp);
+    /* ★触发条件两选一：① sp 跳 ≥SPD_LOG_STEP 档；② "50% 减速"的开关状态变了 ——
+       ★后者必须单独判：50% 是压在最末级 PWM 上的、`sp` 不变，只看 sp 会把它漏掉，
+         而它正是这一轮"看得见却一直没被追到"的那个东西。 */
+    if ((cap_lg != s_spl_cap) ||
+        ((dsp < 0) ? (-dsp >= (int16_t)SPD_LOG_STEP) : (dsp >= (int16_t)SPD_LOG_STEP)))
+    {
+      uint8_t  swm = line_follow_spd_win_mask();
+      const char* wy = (cap_lg != 0u)                      ? "EXIT-SLOW50"
+                     : ((sp == 0)                          ? "STOP"
+                     : ((line_lost != 0u)                  ? "LOST"
+                     : ((on_cross != 0u)                   ? "CROSS"
+                     : ((swm != 0u)                        ? "SPD-WIN"
+                     : ((e >= CURVE_ABS_ERR_THRESH) || (e <= -CURVE_ABS_ERR_THRESH)) ? "CURVE-ERR"
+                     : ((line_follow_boost_active() != 0u) ? "BOOST" : "STRAIGHT")))));
+      if ((s_spl_n < (uint16_t)SPD_LOG_MAX) && ((od_lg - s_spl_od >= (int32_t)SPD_LOG_MIN_MM) || (od_lg < s_spl_od)))
+      {
+        char bl[96];
+        int  nl = snprintf(bl, sizeof(bl), "SPD %d->%d OD=%ld win=%u cap50=%u %s\r\n",
+                           (int)s_spl_sp, (int)sp, (long)od_lg, (unsigned)swm, (unsigned)cap_lg, wy);
+        if (nl > 0) { telemetry_msg(bl); }
+        s_spl_n++;
+        s_spl_od = od_lg;
+      }
+    }
+    s_spl_cap = cap_lg;
+    s_spl_sp  = sp;
+  }
+#endif
 #if WHEEL_SLEW_STEP
   /* ★R82（2026-10-08）【最后一级斜率限制】—— 把"PWM 下限抬升 / NO-STOP-BRAKE 钳位 / 环路输出跳变"
      这些【台阶】全部抹平 ⇒ 电机命令每拍最多变 WHEEL_SLEW_STEP ⇒ 转弯连续、不再一抽一抽 ✓。
@@ -3944,6 +4002,13 @@ void line_follow_gourd_rearm(void)
   s_ex_log_seen = 0u;
   s_ex_log_max  = 0u;
 #endif
+#endif
+#if SPD_LOG_EN
+  /* ★R165：速度事件日志每趟重新开张（否则第二趟行数就用完了）*/
+  s_spl_sp  = -1;
+  s_spl_od  = -100000;
+  s_spl_cap = 0u;
+  s_spl_n   = 0u;
 #endif
 #if GOURD_SPD_WIN_EN
   /* ★1016-R130：葫芦段降速窗口也要每趟复位（否则第二趟一上来就在"已出窗口"状态里） */
