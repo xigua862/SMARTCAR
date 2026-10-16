@@ -24,6 +24,32 @@ static          char     cmd_line[32];
 static          uint8_t  cmd_len   = 0;
 static volatile uint8_t  cmd_ready = 0;
 
+/* ★★★ 2026-10-16（1016-R132，用户要求："每次串口都要加一个回车，好麻烦"）【串口免回车】★★★
+   做法：不带回车的命令靠"静默自动提交"——攒了内容、且距离最后一个字符 ≥ CMD_AUTOSUBMIT_MS
+        就当成一条完整命令（与收到回车【完全等价】，走的还是原来那条分发路径）。
+   为什么用"静默"而不是"来一个字符就执行"：后者会把参数命令切碎执行
+        （打 S57 → 先执行 S（=0 速！）再 S5 再 S57）⇒ 危险。静默法整条一起到，安全。
+   ⚠️ 单个 X 不许提前提交：急停要连发两个 X。第一个 X 若被提前用掉（原本回 "USE: XX …"），
+      第二个 X 又只是"单个" ⇒ **急停从此按不出来**。⇒ 单 X 最多等 CMD_LONE_X_WAIT_MS。
+   ⚠️ 配套安全阀（同一版加的）：P/S/D 这三个"带数值"的命令改成【必须带数字】——
+      原来 atof("") = 0 会被当成 0（S→车速清零、D→KD 清零）；打得慢/被分包时就会踩到。
+   回退：USE_CMD_AUTOSUBMIT 改 0（回到"必须回车"，其余不变）。 */
+#define USE_CMD_AUTOSUBMIT      1
+#define CMD_AUTOSUBMIT_MS       400u    /* 静默多久算一条命令（人手打字间隔通常 <200ms）*/
+#define CMD_LONE_X_WAIT_MS      1500u   /* 单个 X 的等待上限（等第二个 X）*/
+static volatile uint32_t last_rx_tick = 0u;   /* 最后一个字符到达的时刻（HAL tick）*/
+
+/* ★1016-R132：参数类命令"必须带数字"的检查（见上面安全阀说明）*/
+static uint8_t cmd_has_digit(const char *s)
+{
+  while (*s != '\0')
+  {
+    if ((*s >= '0') && (*s <= '9')) return 1u;
+    s++;
+  }
+  return 0u;
+}
+
 /* ============================================================================
  * ★★★ 2026-09-26 晚【串口改成"环形缓冲 + 中断发送" —— 修"经常卡着发不出去"】★★★
  *
@@ -458,6 +484,24 @@ void telemetry_print_full(void)
 /* 处理一条完整命令(主循环调用, 非阻塞) */
 void telemetry_process_command(void)
 {
+#if USE_CMD_AUTOSUBMIT
+  /* ★1016-R132【免回车】：攒了内容 + 已经静默 ⇒ 自动提交（等价于收到回车）*/
+  if ((!cmd_ready) && (cmd_len > 0u))
+  {
+    uint32_t idle = HAL_GetTick() - last_rx_tick;
+    if (idle >= (uint32_t)CMD_AUTOSUBMIT_MS)
+    {
+      /* 单个 X 例外：急停要 XX，别把第一个 X 提前用掉（等第二个，超时才提交）*/
+      if (!((cmd_len == 1u) && ((cmd_line[0] & 0xDF) == 'X')
+            && (idle < (uint32_t)CMD_LONE_X_WAIT_MS)))
+      {
+        cmd_line[cmd_len] = '\0';
+        cmd_len   = 0u;
+        cmd_ready = 1u;
+      }
+    }
+  }
+#endif
   if (!cmd_ready) return;
   cmd_ready = 0;
 
@@ -498,25 +542,50 @@ void telemetry_process_command(void)
 
   if (c == 'P')
   {
-    if (v >= 0.5f && v <= 50.0f) kp_x10 = (int16_t)(v * 10.0f + 0.5f);
-    n = snprintf(buf, sizeof(buf), "OK KP=%d.%d\r\n", kp_x10 / 10, kp_x10 % 10);
+    /* ★1016-R132：必须带数值（否则 atof("")=0 会被当成 0 去判范围，语义不明）*/
+    if (!cmd_has_digit(cmd_line + 1))
+    {
+      n = snprintf(buf, sizeof(buf), "ERR P needs a value (0.5~50)\r\n");
+    }
+    else
+    {
+      if (v >= 0.5f && v <= 50.0f) kp_x10 = (int16_t)(v * 10.0f + 0.5f);
+      n = snprintf(buf, sizeof(buf), "OK KP=%d.%d\r\n", kp_x10 / 10, kp_x10 % 10);
+    }
   }
   else if (c == 'S')                        /* 直道速度; 弯道速度按比例跟着走 */
   {
     test_mode = 0;                          /* S 同时退出单电机测试模式 */
-    if (v >= 0.0f && v <= 99.0f)
+    /* ★1016-R132：必须带数值 —— 原来 atof("")=0 ⇒ 一个孤零零的 S（打字被截断/噪声）
+       会把车速设成 0。这条是"免回车自动提交"的安全阀。 */
+    if (!cmd_has_digit(cmd_line + 1))
     {
-      base_speed  = (int16_t)(v + 0.5f);
-      sp_straight = base_speed;
-      sp_curve    = (int16_t)(v * CURVE_SPEED_RATIO + 0.5f);
-      if (sp_curve < 10) sp_curve = 10;
+      n = snprintf(buf, sizeof(buf), "ERR S needs a value (0~99)\r\n");
     }
-    n = snprintf(buf, sizeof(buf), "OK SP=%d CURVE=%d\r\n", sp_straight, sp_curve);
+    else
+    {
+      if (v >= 0.0f && v <= 99.0f)
+      {
+        base_speed  = (int16_t)(v + 0.5f);
+        sp_straight = base_speed;
+        sp_curve    = (int16_t)(v * CURVE_SPEED_RATIO + 0.5f);
+        if (sp_curve < 10) sp_curve = 10;
+      }
+      n = snprintf(buf, sizeof(buf), "OK SP=%d CURVE=%d\r\n", sp_straight, sp_curve);
+    }
   }
   else if (c == 'D')
   {
-    if (v >= 0.0f && v <= 20.0f) kd_x10 = (int16_t)(v * 10.0f + 0.5f);
-    n = snprintf(buf, sizeof(buf), "OK KD=%d.%d\r\n", kd_x10 / 10, kd_x10 % 10);
+    /* ★1016-R132：必须带数值（原来 atof("")=0 ⇒ 孤零零的 D 会把 KD 清零）*/
+    if (!cmd_has_digit(cmd_line + 1))
+    {
+      n = snprintf(buf, sizeof(buf), "ERR D needs a value (0~20)\r\n");
+    }
+    else
+    {
+      if (v >= 0.0f && v <= 20.0f) kd_x10 = (int16_t)(v * 10.0f + 0.5f);
+      n = snprintf(buf, sizeof(buf), "OK KD=%d.%d\r\n", kd_x10 / 10, kd_x10 % 10);
+    }
   }
   else if (c == 'Q')                        /* ★轨迹回放（黑匣子）—— 请停下再发 */
   {
@@ -681,6 +750,7 @@ void USART1_IRQHandler(void)
     else if (cmd_len < (uint8_t)(sizeof(cmd_line) - 1))
     {
       cmd_line[cmd_len++] = (char)b;
+      last_rx_tick = HAL_GetTick();            /* ★1016-R132：免回车的静默计时 */
     }
   }
   else if (sr & USART_SR_ORE)                   /* 溢出: 读 DR 清标志, 防止 RXNE 中断失效 */
