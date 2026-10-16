@@ -497,6 +497,66 @@ static uint8_t s_be_twoblob      = 0u;   /* 本拍是否看到两坨（团数 >=
 static uint8_t s_be_flip_done    = 0u;   /* ★R36：本回合是否已翻过（图案消失才复位）*/
 #endif
 
+#if GS_ENABLE
+/* ==========================================================================
+ * ★★★ 2026-10-16（1016-R137）【甲方案】里程表排定的"每个切点只许往哪边转"★★★
+ *  他定的方案（"我先走甲吧，简单粗暴"；"纯甲版：USE_BRANCH_EDGE = 0"；方向 左/右/左）。
+ *  为什么：现在"选边方向"由图案"两坨"那一拍翻转相位决定 —— 实测切点图案常是
+ *    "2 路单团"（11000000/10000000）⇒ 接管根本没触发 ⇒ 那一下全靠 PD 自己过（= 运气）；
+ *    一旦触发但相位翻错，接管会主动往错的方向拉（= 1/4 失误的来源）。
+ *  ⇒ 把方向改成**里程表排定**：相对"进圈锚"的偏移落进某切点窗口 ⇒ 那一段只许往 dir 那侧转。
+ *  ★锚（s_gs_base）：本模块自己记 —— 第一个 OD ≥ GOURD_SPD_FROM_MM(11176) 的拍（与葫芦窗口同起点）。
+ *    用"相对偏移"而不用绝对里程：起点对齐/N 趟之间的小漂移都不影响（实测切点跨度只有几十 mm）。
+ *  ★排点用"实测偏移 − GS_BIAS_MM"（滞后补偿）；调参只调偏置那一个数。
+ *  ★位置：误差整形链的最末（PD 之前）—— 让"单向阀"有最终说话权。
+ *  ★回退：GS_ENABLE 改 0（整条失效，行为 = 1016-R136）。
+ * ========================================================================== */
+static uint8_t s_gs_base_set = 0u;              /* 1 = 本趟已记下进圈锚 */
+static int32_t s_gs_base     = 0;               /* 进圈锚（mm，从发车算）*/
+static uint8_t s_gs_in[3]    = {0u, 0u, 0u};    /* 本拍是否在某切点窗口内（只用于打一行日志）*/
+
+/* 在"误差整形链最末"调用：命中窗口就把"与 dir 相反那一侧"的误差清零 */
+static int8_t gourd_sched_apply(int8_t e)
+{
+  static const int32_t k_off[3] = { (int32_t)GS_CUT1_MM, (int32_t)GS_CUT2_MM, (int32_t)GS_CUT3_MM };
+  static const int8_t  k_dir[3] = { (int8_t)GS_DIR1, (int8_t)GS_DIR2, (int8_t)GS_DIR3 };
+  int32_t od = odom_distance_mm();
+  uint8_t k;
+
+  if (s_gs_base_set == 0u)
+  {
+    if (od >= (int32_t)GOURD_SPD_FROM_MM)      /* 进圈那一刻当锚（与葫芦窗口同一个门槛）*/
+    {
+      s_gs_base     = od;
+      s_gs_base_set = 1u;
+    }
+    return e;
+  }
+
+  for (k = 0u; k < 3u; k++)
+  {
+    int32_t d  = od - s_gs_base;                       /* 相对进圈点 */
+    int32_t c  = k_off[k] - (int32_t)GS_BIAS_MM;       /* 实测偏移 − 手点滞后补偿 */
+    uint8_t in = ((d >= (c - (int32_t)GS_WIN_MM)) && (d <= (c + (int32_t)GS_WIN_MM))) ? 1u : 0u;
+
+    if ((in != 0u) && (s_gs_in[k] == 0u))
+    {
+      telemetry_msg((k == 0u) ? "GSCHED 1 win (L only)"
+                    : (k == 1u) ? "GSCHED 2 win (R only)"
+                                : "GSCHED 3 win (L only)");
+    }
+    s_gs_in[k] = in;
+
+    if (in != 0u)
+    {
+      if ((k_dir[k] > 0) && (e > 0)) e = 0;            /* 只许左 ⇒ 屏蔽右 */
+      if ((k_dir[k] < 0) && (e < 0)) e = 0;            /* 只许右 ⇒ 屏蔽左 */
+    }
+  }
+  return e;
+}
+#endif
+
 void line_follow_control(int16_t base)
 {
 
@@ -2463,6 +2523,11 @@ void line_follow_control(int16_t base)
       e = (int8_t)((int16_t)e - (int16_t)G7_LEFT_BIAS);
     }
   }
+#if GS_ENABLE
+  /* ★1016-R137【甲方案单向阀】：放在这里 = 误差整形链的最末（PD 之前），有最终说话权。
+     命中切点窗口 ⇒ 与"该切点方向"相反那一侧的误差清零（只许往那侧转/直行）。 */
+  e = gourd_sched_apply(e);
+#endif
   int16_t d_term = (int16_t)(e - last_e);
   /* ★★★ 2026-10-08（1008-R31）【葫芦圈内降低 KP】—— 用户要求 ★★★
      现象：圈上左右晃幅度太大，影响过切点（晃大了图案就更不容易满足"两坨"判据）。
@@ -3643,6 +3708,14 @@ void line_follow_gourd_rearm(void)
     s_sw_any = 0u;
     s_sw_spd = 0;
   }
+#endif
+#if GS_ENABLE
+  /* ★1016-R137：甲方案（里程表排定的单向阀）每趟复位 —— 锚要重新记（否则第二趟一上来就"已在圈里"）*/
+  s_gs_base_set = 0u;
+  s_gs_base     = 0;
+  s_gs_in[0]    = 0u;
+  s_gs_in[1]    = 0u;
+  s_gs_in[2]    = 0u;
 #endif
 #if USE_START_BLIND
   /* ★每趟起步的瞬间装载"盲直行"：这里正是 FSM 读完秒、清零里程、进 RUN 的那一处
