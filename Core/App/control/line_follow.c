@@ -3,6 +3,7 @@
 #include "app_config.h"
 #include "drivers/motor.h"
 #include "drivers/line_sensor.h"
+#include "drivers/led.h"      /* ★2026-10-16 补：R122 提速激活时亮三灯用了 led_mask()，原先漏 include（声明隐式，2 条 warning） */
 #include "control/filter.h"
 #if USE_CORR_TRIM && USE_SYMMETRIC_CORR_TRIM
 #include "control/steering_trim.h"
