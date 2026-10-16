@@ -45,3 +45,7 @@ desktop.ini
 *.7z
 *.rar
 _bak_cubemx_*
+
+# ---- 队友 build.ps1 产生的日志（2026-10-16 补）----
+MDK-ARM/build-*.log
+MDK-ARM/flash.log
