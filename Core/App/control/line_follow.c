@@ -411,6 +411,14 @@ static uint8_t s_gourd_armed = 0u;   /* 1 = 里程已越过阈值 ⇒ 启用葫�
 static uint8_t s_gsw_active = 0u;    /* 1 = 在降速窗口内（进圈后）*/
 static uint8_t s_gsw_done   = 0u;    /* 1 = 本趟已出窗口 ⇒ 不再进（每趟由 rearm 复位）*/
 #endif
+
+#if CORNER_SPD_WIN_EN
+/* ★2026-10-16（1016-R133）【直角弯前减速窗口】的状态 —— 两个槽位（①开头第一个弯 ②最后的弯）
+   方案/依据/调参方向见 app_config.h 的长注释；与葫芦窗口同款：锁存推进 + 每趟 rearm 复位。 */
+static uint8_t s_cw_active[2] = {0u, 0u};   /* 1 = 该槽在窗口内 */
+static uint8_t s_cw_done[2]   = {0u, 0u};   /* 1 = 本趟该槽已出窗口 ⇒ 不再进 */
+static uint8_t s_cw_any       = 0u;         /* 任一槽在窗口内（速度块 / 提速块读它）*/
+#endif
 #if USE_GOURD_EXIT_ZONE
 /* ★2026-10-08（1008-R22/R23）出圈"里程窗口+图案"判据⑤的状态 */
 static uint8_t  s_gourd_done = 0u;   /* 1 = 本次已出圈转过 ⇒ 葫芦圈逻辑全部关掉（里程闸门也跟着关）*/
@@ -591,6 +599,40 @@ void line_follow_control(int16_t base)
         s_gsw_active = 0u;
         s_gsw_done   = 1u;
       }
+    }
+  }
+#endif
+
+#if CORNER_SPD_WIN_EN
+  /* ★★★ 2026-10-16（1016-R133）【直角弯前减速窗口】的推进 —— 见 app_config.h 的长注释 ★★★
+     两槽：① 开头第一个直角弯（他实测车头到角 1195，窗口 900→1500）
+           ② 最后的直角弯（等他实测后填 CORNER2_*；任一项 ≤0 ⇒ 该槽关闭）
+     两个方向都只认【里程】（锁存推进，不依赖 IG/图案）；写在速度块之前 —— 本拍就要用。 */
+  {
+    int32_t od_now = odom_distance_mm();
+    uint8_t i;
+    s_cw_any = 0u;
+    for (i = 0u; i < 2u; i++)
+    {
+      int32_t from = (i == 0u) ? (int32_t)CORNER1_FROM_MM : (int32_t)CORNER2_FROM_MM;
+      int32_t to   = (i == 0u) ? (int32_t)CORNER1_TO_MM   : (int32_t)CORNER2_TO_MM;
+      if ((from <= 0) || (to <= from)) continue;          /* 该槽未启用 */
+      if (s_cw_done[i] != 0u) continue;                    /* 本趟已过 */
+      if (s_cw_active[i] == 0u)
+      {
+        if (od_now >= from)
+        {
+          s_cw_active[i] = 1u;
+          telemetry_msg((i == 0u) ? "CORNER-SLOW 1 set (corner ahead)" : "CORNER-SLOW 2 set");
+        }
+      }
+      else if (od_now >= to)
+      {
+        s_cw_active[i] = 0u;
+        s_cw_done[i]   = 1u;
+        telemetry_msg((i == 0u) ? "CORNER-SLOW 1 done (restore)" : "CORNER-SLOW 2 done");
+      }
+      if (s_cw_active[i] != 0u) s_cw_any = 1u;
     }
   }
 #endif
@@ -1241,6 +1283,15 @@ void line_follow_control(int16_t base)
     sp_c = (int16_t)GOURD_SPD_CURVE;
   }
 #endif
+#if CORNER_SPD_WIN_EN
+  /* ★1016-R133【直角弯前减速】：窗口内两档都换成 CORNER_SPD（与葫芦窗口同款写法）。
+     ⚠️ 放在葫芦窗口之后：万一两者重叠（现实中不重叠）以本窗口为准。 */
+  if (s_cw_any != 0u)
+  {
+    sp_s = (int16_t)CORNER_SPD;
+    sp_c = (int16_t)CORNER_SPD;
+  }
+#endif
   if (r.active == 0)
   {
     sp = sp_c;                        /* 丢线先减速 */
@@ -1400,6 +1451,9 @@ void line_follow_control(int16_t base)
     uint8_t boost_ok = (uint8_t)((r.active > 0u) && (!on_cross) && (!wide_long) && (!line_lost)
 #if GOURD_SPD_WIN_EN
                                  && (s_gsw_active == 0u)
+#endif
+#if CORNER_SPD_WIN_EN
+                                 && (s_cw_any == 0u)     /* ★1016-R133：直角弯减速窗口内同样禁提速 */
 #endif
                                 );
 
@@ -3542,6 +3596,12 @@ void line_follow_gourd_rearm(void)
   /* ★1016-R130：葫芦段降速窗口也要每趟复位（否则第二趟一上来就在"已出窗口"状态里） */
   s_gsw_active = 0u;
   s_gsw_done   = 0u;
+#endif
+#if CORNER_SPD_WIN_EN
+  /* ★1016-R133：直角弯减速窗口（两槽）同样每趟复位 */
+  s_cw_active[0] = 0u; s_cw_active[1] = 0u;
+  s_cw_done[0]   = 0u; s_cw_done[1]   = 0u;
+  s_cw_any       = 0u;
 #endif
 #if USE_START_BLIND
   /* ★每趟起步的瞬间装载"盲直行"：这里正是 FSM 读完秒、清零里程、进 RUN 的那一处
