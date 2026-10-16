@@ -511,7 +511,8 @@ static uint8_t s_be_flip_done    = 0u;   /* ★R36：本回合是否已翻过（
  * ========================================================================== */
 static uint8_t s_gsp_anchored = 0u;    /* 1 = 本趟已记下进圈锚 */
 static int32_t s_gsp_base     = 0;     /* 进圈锚（mm，从发车算）*/
-static uint8_t s_gsp_win_mask = 0u;    /* ★R148：本拍哪些切点窗口开着（bit0=①/bit1=②/bit2=③）—— 给 LED 快闪用 */
+static uint8_t s_gsp_win_mask = 0u;    /* ★R148：本拍哪些"信标窗口"开着（窄，±GSP_BLINK_WIN_MM）—— 给 LED 快闪用 */
+static uint8_t s_gsp_dir_mask = 0u;    /* ★R152：本拍哪些"方向窗口"开着（宽，±k_gsp_win[]）—— 给"只许一个方向"用 */
 #if (GSP_TURN_MASK != 0)
 static uint8_t s_gspt_left = 0u;       /* ★R151：硬转剩余拍数（>0 = 正在硬转）*/
 static uint8_t s_gspt_prev = 0u;       /* ★R151：上一拍的信标命中（做上升沿判定）*/
@@ -521,6 +522,7 @@ static uint8_t s_gspt_prev = 0u;       /* ★R151：上一拍的信标命中（�
 static const int32_t k_gsp_ctr[3] = { (int32_t)GSP_CUT1_MM, (int32_t)GSP_CUT2_MM, (int32_t)GSP_CUT3_MM };
 static const int8_t  k_gsp_dir[3] = { (int8_t)GSP_DIR1, (int8_t)GSP_DIR2, (int8_t)GSP_DIR3 };
 static const int32_t k_gsp_win[3] = { (int32_t)GSP_WIN1_MM, (int32_t)GSP_WIN2_MM, (int32_t)GSP_WIN3_MM };
+static const int8_t  k_gsp_ow[3]  = { (int8_t)GSP_OW_DIR1, (int8_t)GSP_OW_DIR2, (int8_t)GSP_OW_DIR3 };  /* ★R152：只许哪一侧 */
 
 /* 返回 +1 = 选左侧 / -1 = 选右侧 / 0 = 不在任何切点窗口内 */
 static int8_t gsp_dir_for(int32_t od)
@@ -737,6 +739,7 @@ void line_follow_control(int16_t base)
       s_gsp_anchored = 1u;
     }
     s_gsp_win_mask = 0u;
+    s_gsp_dir_mask = 0u;                             /* ★R152 */
     if (s_gsp_anchored != 0u)
     {
       uint8_t wi;
@@ -747,7 +750,8 @@ void line_follow_control(int16_t base)
         if (dd < 0) dd = -dd;
         /* ★R149：闪的区间用**窄信标半径**（GSP_BLINK_WIN_MM）—— 方向窗口仍用各自的 k_gsp_win[]
            ⇒ 闪 = "窄标记"，专门给肉眼对准真切点用；方向覆盖不受影响。 */
-        if (dd <= (int32_t)GSP_BLINK_WIN_MM) { s_gsp_win_mask |= (uint8_t)(1u << wi); }
+        if (dd <= (int32_t)GSP_BLINK_WIN_MM) { s_gsp_win_mask |= (uint8_t)(1u << wi); }   /* 窄 = 信标（给眼睛）*/
+        if (dd <= k_gsp_win[wi])             { s_gsp_dir_mask |= (uint8_t)(1u << wi); }   /* 宽 = 方向（管转向，★R152）*/
       }
     }
   }
@@ -2601,6 +2605,27 @@ void line_follow_control(int16_t base)
       e = (int8_t)((int16_t)e - (int16_t)G7_LEFT_BIAS);
     }
   }
+#if (GS_PHASE_EN && (GSP_ONEWAY_MASK != 0))
+  /* ★★★ 2026-10-16（1016-R152）【只许一个方向】—— 他在切点2 要的："按着右边循迹" ★★★
+     方向窗口内：把"与规定方向相反"的那侧误差清零 ⇒ 车照常循迹，只是不许往那边修；
+     往规定方向的修正照旧 ⇒ 效果 = "按着那一侧走"。
+     ★放在这里 = 误差整形链的最后（接管/G7 之后）⇒ 连"接管选错边"也能挡住（它给左就清零 ⇒ 那几拍直行）。
+     ★半径用"方向窗口"（切点2 = ±GSP_WIN2_MM）；"闪"仍是窄信标（±GSP_BLINK_WIN_MM）—— 一宽一窄互不干扰。
+     ★回退：GSP_ONEWAY_MASK 改 0。 */
+  {
+    uint8_t hit_ow = (uint8_t)(s_gsp_dir_mask & (uint8_t)GSP_ONEWAY_MASK);
+    if (hit_ow != 0u)
+    {
+      uint8_t oi;
+      for (oi = 0u; oi < 3u; oi++)
+      {
+        if ((hit_ow & (uint8_t)(1u << oi)) == 0u) continue;
+        if (k_gsp_ow[oi] > 0) { if (e < 0) { e = 0; } }   /* 只许右 ⇒ 屏蔽左 */
+        else                  { if (e > 0) { e = 0; } }   /* 只许左 ⇒ 屏蔽右 */
+      }
+    }
+  }
+#endif
   int16_t d_term = (int16_t)(e - last_e);
   /* ★★★ 2026-10-08（1008-R31）【葫芦圈内降低 KP】—— 用户要求 ★★★
      现象：圈上左右晃幅度太大，影响过切点（晃大了图案就更不容易满足"两坨"判据）。
@@ -3787,6 +3812,7 @@ void line_follow_gourd_rearm(void)
   s_gsp_anchored = 0u;
   s_gsp_base     = 0;
   s_gsp_win_mask = 0u;
+  s_gsp_dir_mask = 0u;
 #if (GSP_TURN_MASK != 0)
   s_gspt_left = 0u;      /* ★R151：硬转状态同进同出 */
   s_gspt_prev = 0u;
