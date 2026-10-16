@@ -186,6 +186,17 @@ static uint8_t  s_ex_done = 0u;   /* ★R91：出口右转是否已完成（一�
 static int32_t  s_ex_adv  = -1;   /* ★R102：进入"前进一小段"时的里程（-1 = 还没进入 ✓）*/
 static uint8_t  s_fin_state = 0u;   /* ★R108：终点状态（0=未触发 1=前进中 2=已停车 ✓）*/
 static uint16_t s_fin_fr    = 0u;   /* ★R108：终点"再前进"已过的拍数 */
+#if EXIT_LOG_EN
+/* ★★★ 2026-10-16（1016-R162）【出口只读诊断】—— 他："怎么出口又没触发了呀" ★★★
+   为什么要它：出口这一路（R91 模块）**一行日志都没有** ⇒ 触发/不触发都看不见，没法定位。
+   这里**只加打印、不动任何判据**：
+     ① 刚进出口段（OD 首次 ≥ GOURD_EXIT_FROM_MM）打一行（带上当时的亮路数）；
+     ② 段内每刷新一次"最大亮路数"打一行 ⇒ 跑一趟就知道"车在出口到底看见了几路"；
+     ③ 真的开始转向时打一行（带上触发时的亮路数与里程）。
+   ⇒ 下次再"没触发"，这三行就能分清是 **①图案没够 4 路** 还是 **②里程漂移、物理位置已经过了出口**。 */
+static uint8_t s_ex_log_seen = 0u;   /* 1 = 已打过"进入出口段"那行 */
+static uint8_t s_ex_log_max  = 0u;   /* 出口段内见过的最大亮路数 */
+#endif
 #if WHEEL_SLEW_STEP
 /* ★2026-10-16 修 #177-D：这两颗只被下方 #if WHEEL_SLEW_STEP 的斜率限制块用到，
    原来声明在 USE_SPEED_LOOP 里 ⇒ WHEEL_SLEW_STEP=0（R84 已撤）时成为"声明未引用"警告。
@@ -648,8 +659,40 @@ void line_follow_control(int16_t base)
         }
         /* ★R97（用户新定义）：异常 = 【亮起的路数 > 4】✓（统一规定；出口那片宽图案正好满足 ✓）*/
         /* ★R107：阈值改为可调（用户实测"亮路数 > 4"在出口处从未满足 ✗）*/
+#if EXIT_LOG_EN
+        /* ★R162【只读诊断】—— 见 s_ex_log_* 的说明；只打印，不改判据 */
+        {
+          char elb[80];
+          int  eln;
+          if (s_ex_log_seen == 0u)
+          {
+            s_ex_log_seen = 1u;
+            s_ex_log_max  = ex_lit;
+            eln = snprintf(elb, sizeof(elb), "EXIT zone: OD=%ldmm lit=%u raw=%02X (need>=%u)\r\n",
+                           (long)odom_distance_mm(), (unsigned)ex_lit, (unsigned)ex_raw,
+                           (unsigned)EXIT_ANOM_LIT_MIN);
+            if (eln > 0) { telemetry_msg(elb); }
+          }
+          else if (ex_lit > s_ex_log_max)
+          {
+            s_ex_log_max = ex_lit;
+            eln = snprintf(elb, sizeof(elb), "EXIT lit-max=%u OD=%ldmm raw=%02X\r\n",
+                           (unsigned)ex_lit, (long)odom_distance_mm(), (unsigned)ex_raw);
+            if (eln > 0) { telemetry_msg(elb); }
+          }
+        }
+#endif
         if (ex_lit >= (uint8_t)EXIT_ANOM_LIT_MIN)
         {
+#if EXIT_LOG_EN
+          {
+            char etb[72];
+            int  etn = snprintf(etb, sizeof(etb), "EXIT TRIGGER: lit=%u OD=%ldmm raw=%02X -> turn %ums\r\n",
+                                (unsigned)ex_lit, (long)odom_distance_mm(), (unsigned)ex_raw,
+                                (unsigned)EXIT_TURN_MS);
+            if (etn > 0) { telemetry_msg(etb); }
+          }
+#endif
           s_ex_adv = odom_distance_mm();   /* ★R102：只记住起点 ⇒ 先往前走一段（不马上转 ✓）*/
         }
       }
@@ -3879,6 +3922,25 @@ void line_follow_gourd_rearm(void)
 {
 #if USE_GOURD_EXIT
   ge_fired = 0u;
+#endif
+#if USE_SPEED_LOOP
+  /* ★★★ 2026-10-16（1016-R162）【补上"出口右转"的每趟复位】—— 他："怎么出口又没触发了呀" ★★★
+     真因：R91 出口模块的三个状态（s_ex_done / s_ex_adv / s_ex_tmr）**从来没被复位过** ——
+       全工程搜 `s_ex_done` 只有一处（声明）= 初始化；本函数（每趟起步 FSM 都会调）的清单里也没有它们。
+     后果：`s_ex_done` 一旦置 1 就**再也不回 0** ⇒ "一趟只做一次"实际变成了
+       **"一次上电只做一次"** ⇒ 上电后第 1 趟出口正常右转，**第 2 趟起出口永远不转**（现象与他说的一致："又没触发"）。
+     ★为什么必须复位：本函数的调用点就是"每趟起步"（car_fsm.c 读完秒、清零里程、进 CAR_RUN 那一刻），
+       与 `ge_fired` / 速度窗口 / 乙方案锚 同一个位置 —— 出口跟它们是同一类"每趟一次性"状态，漏了它。
+     ★会不会因此"一趟里重复触发"：不会。`s_ex_done` 在本趟转完之后照样锁住（见出口块的 `s_ex_done = 1u`），
+       复位只发生在"下一趟起步"。
+     ★声明处同进同出：s_ex_* 声明在 `#if USE_SPEED_LOOP` 里，这里也用同一个开关罩。 */
+  s_ex_tmr  = 0u;
+  s_ex_done = 0u;
+  s_ex_adv  = -1;
+#if EXIT_LOG_EN
+  s_ex_log_seen = 0u;
+  s_ex_log_max  = 0u;
+#endif
 #endif
 #if GOURD_SPD_WIN_EN
   /* ★1016-R130：葫芦段降速窗口也要每趟复位（否则第二趟一上来就在"已出窗口"状态里） */

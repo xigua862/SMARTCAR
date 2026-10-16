@@ -298,7 +298,7 @@ void car_fsm_run(uint32_t dt_ms)
        R148 先做"指定槽的窗口期 ⇒ 三灯快闪"；R154 曾改成"哪个窗口亮哪个灯"；R155/R156 起**几套并存**，见下面总表。 */
 #if ((GSP_LED_MASK != 0) || (GSP_EXIT_LED != 0) || (GSP_BLINK_MASK != 0) || (SPD_WIN_BLINK_MASK != 0))
     /* ★★★ 2026-10-16（1016-R155/R156）【跑车时"看不见串口"的 LED 指示总表】—— 按优先级从高到低 ★★★
-       ① 葫芦弯出口**触发** ⇒ **三灯流水灯**（LED1→LED2→LED3 逐个亮，跑 GSP_EXIT_LED_MS 后收工）
+       ① 葫芦弯出口**触发** ⇒ **三灯闪烁**（★R162 改成"三灯同闪"；`GSP_EXIT_LED_MODE 1` 可换回 R155 的流水灯）
        ② 三灯**同时闪烁** —— 两个来源，任一命中就闪：
           · 切点窗口（`GSP_BLINK_MASK` 选槽；现在 = 切点3，他要用它判"窗口准不准"）
           · **速度窗口槽（`SPD_WIN_BLINK_MASK` 选槽 —— R156 加的；现在 = 槽③最后直角弯的减速）**
@@ -320,12 +320,22 @@ void car_fsm_run(uint32_t dt_ms)
         s_gsp_exit_prev = ea;
         if (s_gsp_exit_busy != 0u)
         {
-          uint32_t stepms = (uint32_t)GSP_EXIT_LED_STEP_MS;
-          uint32_t el     = (uint32_t)(now - s_gsp_exit_t0);
-          if (stepms == 0u) { stepms = 200u; }
+          uint32_t el = (uint32_t)(now - s_gsp_exit_t0);
           if (el < (uint32_t)GSP_EXIT_LED_MS)
           {
-            leds    = (uint8_t)(0x01u << ((el / stepms) % 3u));   /* 0→1→2→0 … 每颗只亮一颗 = 流水灯 */
+#if (GSP_EXIT_LED_MODE == 1)
+            /* R155 那版：流水灯（LED1→LED2→LED3 逐个亮）*/
+            uint32_t stepms = (uint32_t)GSP_EXIT_LED_STEP_MS;
+            if (stepms == 0u) { stepms = 200u; }
+            leds = (uint8_t)(0x01u << ((el / stepms) % 3u));
+#else
+            /* ★R162（他："出口触发阶段现在LED3灯闪烁"）：**三灯一起闪**，节奏借用 GSP_BLINK_MS */
+            {
+              uint32_t half = (uint32_t)(GSP_BLINK_MS / 2u);
+              if (half == 0u) { half = 25u; }
+              leds = ((now / half) & 1u) ? 0x00u : 0x07u;
+            }
+#endif
             must_wr = 1u;
           }
           else { s_gsp_exit_busy = 0u; }                          /* 跑够 ⇒ 收工，交回普通指示 */
