@@ -185,8 +185,13 @@ static uint8_t  s_ex_done = 0u;   /* ★R91：出口右转是否已完成（一�
 static int32_t  s_ex_adv  = -1;   /* ★R102：进入"前进一小段"时的里程（-1 = 还没进入 ✓）*/
 static uint8_t  s_fin_state = 0u;   /* ★R108：终点状态（0=未触发 1=前进中 2=已停车 ✓）*/
 static uint16_t s_fin_fr    = 0u;   /* ★R108：终点"再前进"已过的拍数 */
+#if WHEEL_SLEW_STEP
+/* ★2026-10-16 修 #177-D：这两颗只被下方 #if WHEEL_SLEW_STEP 的斜率限制块用到，
+   原来声明在 USE_SPEED_LOOP 里 ⇒ WHEEL_SLEW_STEP=0（R84 已撤）时成为"声明未引用"警告。
+   按本项目规矩"#if 范围声明/复位/使用同进同出"收进同一个 #if。行为零变化。 */
 static int16_t s_slew_m1 = 0;   /* ★R82：上一拍最终输给左轮的 PWM（斜率限制用）*/
 static int16_t s_slew_m2 = 0;   /* ★R82：右轮 */
+#endif
 #if SPD_DEAD_FB_GUARD
 /* ★2026-10-08【单轮测速断线】状态（判据与理由见 app_config.h 的 SPD_DEAD_FB_*）*/
 static uint16_t s_fb_dead_cnt[2] = {0, 0};   /* 漏桶计数：满足 +1、不满足 −1 */
@@ -441,6 +446,10 @@ static uint16_t s_be_log_n = 0u;
    只记录、不控制 ✓：凡是【团数 ≥ 2】的拍（不管有没有被接受）都记一条 ✓（里程 + 原始位图 + 亮路数 + 团数 + 是否被接受）
    ⇒ 跑一趟后就能看到"像切点但没被接受"的那些候选长什么样 ✓ —— 这正是台账看不到的部分 ✓。
    ★数据放在 RAM 数组里（不用串口打印 ✓ —— 打印一次 6ms 会挤掉控制环 ✗）。 */
+#if USE_CAND_LOG
+/* ★2026-10-16：R117 撤销"候选日志实验"（R114~R116）后，收集还在、打印已删
+   ⇒ 数组只写不读 = #550-D 警告 + 白占约 480B RAM。按规矩用 #if 默认关，
+   要再看候选（定位切点问题）就把 app_config.h 的 USE_CAND_LOG 改 1。行为零变化。 */
 typedef struct {
   int32_t od;
   uint8_t raw;
@@ -452,6 +461,7 @@ typedef struct {
 #define CAND_MAX 40
 static cand_t   s_cand[CAND_MAX];
 static uint16_t s_cand_n = 0u;
+#endif
 #endif
 
 #if USE_BRANCH_EDGE
@@ -912,6 +922,7 @@ void line_follow_control(int16_t base)
       /* ★R100：加【和接管同一个闸门】（s_gourd_armed ✓）—— 否则起步阶段的斑马线/起跑线会把 40 条刷满 ✗
          （实测：上一趟头 60mm 就写了 25 条 ⇒ 表只到 11.4m ⇒ 出口那一段永远看不到 ✗）。
          圈外一条不记 ✓ ⇒ 40 条足够覆盖整圈 + 出口 ✓✓。 */
+#if USE_CAND_LOG
       if ((s_gourd_armed != 0u) && (nblob >= 2u) && (s_be_flip_done == 0u) && (s_cand_n < (uint16_t)CAND_MAX))
       {
         s_cand[s_cand_n].od  = odom_distance_mm();
@@ -922,6 +933,7 @@ void line_follow_control(int16_t base)
         s_cand[s_cand_n].acc = 0u;
         s_cand_n++;
       }
+#endif
       /* ★R36：图案消失 ⇒ 重新武装本回合的翻转许可 */
       if (s_be_twoblob == 0u) { s_be_flip_done = 0u; }
 #if USE_GOURD_ODOM_ARM
@@ -1006,6 +1018,7 @@ void line_follow_control(int16_t base)
           s_be_log[s_be_log_n].nb   = nblob;
           s_be_log[s_be_log_n].w1   = w1;
 
+#if USE_CAND_LOG
         /* ★R98：这一拍【被接受】了 ⇒ 记一条候选（acc=1 ✓）*/
         if (s_cand_n < (uint16_t)CAND_MAX)
         {
@@ -1017,7 +1030,8 @@ void line_follow_control(int16_t base)
           s_cand[s_cand_n].acc = 1u;
           s_cand_n++;
         }
-        if (s_cand_n > (uint16_t)CAND_MAX) { s_cand_n = (uint16_t)CAND_MAX; }   /* 读一下避免 #550-D ✓ */
+        if (s_cand_n > (uint16_t)CAND_MAX) { s_cand_n = (uint16_t)CAND_MAX; }
+#endif
           s_be_log_n++;
         }
 #endif

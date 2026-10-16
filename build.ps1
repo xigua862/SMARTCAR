@@ -1,4 +1,4 @@
-param([string]$Keil = 'C:/keil5/UV4/UV4.exe')
+param([string]$Keil = 'D:/Keil_v5/UV4/UV4.exe')   # ★2026-10-16 本机 Keil 在 D:\Keil_v5（原脚本写 C:/keil5，本机无此路径；队友机器上才是 C:）
 $ErrorActionPreference = 'Stop'
 $project = Join-Path $PSScriptRoot 'MDK-ARM/test16.uvprojx'
 $log = Join-Path $PSScriptRoot 'MDK-ARM/build-0929-R1.log'
