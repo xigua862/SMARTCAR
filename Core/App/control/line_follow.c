@@ -2706,27 +2706,30 @@ void line_follow_control(int16_t base)
     }
   }
 #endif
-#if START_STRAIGHT_EN
-  /* ★★★ 2026-10-16（1016-R157 / R159）【起步：盲走直 + 起步区不跟斑马线】★★★
+#if (START_STRAIGHT_EN || START_ZEBRA_IGNORE)
+  /* ★★★ 2026-10-16（1016-R157 / R159 / R164）【起步区：盲走直 + 斑马线不跟】★★★
      R157 他："发车给个…硬走直线，不然翘头加斑马线很容易就乱了"；
-     R159 他又报（照录）：**"不巡线你往斑马线上走啥？开头就跟着斑马线走歪"** ——
-       ① 纯盲走直只有几十毫米，一交回 PD，PD 就把**斑马线（一大片白）当线去咬** ⇒ 车被拽着斜过去；
-       ② 而纯盲走又不管线，拉长了容易脱线（R158 他："太长了容易脱线，50mm 够了"）。
-     ⇒ 两段规则（都在误差整形链的**最后**：接管/G7/单向阀之后，谁都抢不走方向盘）：
-         ① `OD < START_STRAIGHT_MM(50)`：**纯盲走直**（压住起步那一两拍的抖动/翘头）；
-         ② `OD < START_ZEBRA_MM(600)` ：**照常循线，但"宽图案"（亮≥START_ZEBRA_LIT_MIN 路 = 斑马线）压成直行**
-            ⇒ 细线（2~3 路）该修还修（不脱线）、斑马线不跟（不被拽歪）。
-     ★回退：START_STRAIGHT_EN 改 0（起步区不特殊处理）/ START_ZEBRA_IGNORE 改 0（只要那 50mm 盲走）。 */
+     R159 他又报：**"不巡线你往斑马线上走啥？开头就跟着斑马线走歪"**（PD 把斑马线当线去咬）；
+     R160 他要求这套先回退（三个开关全关）；
+     ★R164 他选了 **A 方案：只把"斑马线不跟"开回来** ⇒ 本块拆成**两个各自独立的 if**（各配一个开关，
+       否则"关掉盲走直"会把斑马线这条一起关死 —— R160~R163 就是这么被一起关掉的）：
+         ① `START_STRAIGHT_EN`（**现在关**）：起步前 START_STRAIGHT_MM 纯盲走直（不看传感器）；
+         ② `START_ZEBRA_IGNORE`（**现在开**）：起步区（OD < START_ZEBRA_MM）里**"宽图案"
+            （亮 ≥ START_ZEBRA_LIT_MIN 路 = 斑马线）压成直行**，而**细线（2~3 路）照常循迹**
+            ⇒ 车正常跟线、只是不被斑马线拽歪（没有"闭眼走直"的风险 = 他选 A 的理由）。
+     ⚠️ 位置：误差整形链的**最后**（接管/G7/单向阀之后）⇒ 这一段谁都抢不走方向盘。
+     ★回退：`START_ZEBRA_IGNORE` 改 0（= R163 的行为）。 */
   {
     int32_t od_st = odom_distance_mm();
-    if (od_st < (int32_t)START_STRAIGHT_MM)
-    {
-      e = 0;                                                  /* ① 起步那一两拍：闭眼走直 */
-    }
+#if START_STRAIGHT_EN
+    /* ① 起步前 N mm：纯盲走直（完全不看传感器）*/
+    if (od_st < (int32_t)START_STRAIGHT_MM) { e = 0; }
+#endif
 #if START_ZEBRA_IGNORE
-    else if (od_st < (int32_t)START_ZEBRA_MM)
+    /* ② 起步区里"宽图案（斑马线）"不跟；细线该修还修 */
+    if (od_st < (int32_t)START_ZEBRA_MM)
     {
-      if (r.active >= (uint8_t)START_ZEBRA_LIT_MIN) { e = 0; } /* ② 起步区里"宽图案"= 斑马线 ⇒ 不跟它 */
+      if (r.active >= (uint8_t)START_ZEBRA_LIT_MIN) { e = 0; }
     }
 #endif
   }
