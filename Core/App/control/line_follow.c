@@ -741,7 +741,9 @@ void line_follow_control(int16_t base)
       {
         int32_t dd = rel - (k_gsp_ctr[wi] - (int32_t)GSP_BIAS_MM);
         if (dd < 0) dd = -dd;
-        if (dd <= k_gsp_win[wi]) { s_gsp_win_mask |= (uint8_t)(1u << wi); }
+        /* ★R149：闪的区间用**窄信标半径**（GSP_BLINK_WIN_MM）—— 方向窗口仍用各自的 k_gsp_win[]
+           ⇒ 闪 = "窄标记"，专门给肉眼对准真切点用；方向覆盖不受影响。 */
+        if (dd <= (int32_t)GSP_BLINK_WIN_MM) { s_gsp_win_mask |= (uint8_t)(1u << wi); }
       }
     }
   }
