@@ -3173,7 +3173,9 @@ void line_follow_control(int16_t base)
 
   /* ★R101（用户要求）：到达右转里程后【减速 80%】✓，出圈（s_ex_done=1）后自动恢复 ✓
      作用在最终两轮命令上 ⇒ 无论速度环如何调都有效 ✓；缩放是两轮同比例 ⇒ 保持转向关系 ✓。
-     ★★★ 2026-10-16（1016-R165）【补上"距离上限"—— 修一个大 bug】★★★
+     ★★★ 2026-10-16（1016-R166）【本改动暂时退掉（`EXIT_SLOW_WIN_EN 0` = 老行为）】★★★
+     ★R165 曾给它补了"距离上限"（见下面 `#if EXIT_SLOW_WIN_EN` 那两处）—— 他 R166 说"回退回退" ⇒ 先退回老行为，
+       改动留档：把 `EXIT_SLOW_WIN_EN` 写 1 就能重新启用（那才是"不再泄漏到后半段"的正确行为）。
      原来的条件只有 `s_ex_done == 0u` ⇒ **出口右转一旦没触发，s_ex_done 永远是 0**，
      这个 50% 就会从 12844 一直吃到终点 —— 现象就是**过了葫芦之后一路都在刹车**：
        · 他："葫芦弯道之后建议全程 57"（R157）、"减速[刹车]还是太早"、"改槽③真的一点效果都没有"
@@ -3183,8 +3185,11 @@ void line_follow_control(int16_t base)
      出口转向成功（`s_ex_done=1`）或**走出这一段**都立刻恢复 ⇒ 不可能再泄漏到后半段。
      ★回退：EXIT_SLOW_PCT 改 0（整条功能关）。 */
   if ((EXIT_SLOW_PCT > 0u) && (EXIT_SLOW_PCT < 100u) && (s_ex_done == 0u) &&
-      (odom_distance_mm() >= (int32_t)GOURD_EXIT_FROM_MM) &&
-      (odom_distance_mm() <  (int32_t)(GOURD_EXIT_FROM_MM + GOURD_EXIT_SLOW_MM)))
+      (odom_distance_mm() >= (int32_t)GOURD_EXIT_FROM_MM)
+#if EXIT_SLOW_WIN_EN
+      && (odom_distance_mm() < (int32_t)(GOURD_EXIT_FROM_MM + GOURD_EXIT_SLOW_MM))
+#endif
+      )
   {
     m1 = (int16_t)(((int32_t)m1 * (int32_t)EXIT_SLOW_PCT) / 100);
     m2 = (int16_t)(((int32_t)m2 * (int32_t)EXIT_SLOW_PCT) / 100);
@@ -3199,8 +3204,11 @@ void line_follow_control(int16_t base)
   {
     int32_t od_lg = odom_distance_mm();
     uint8_t cap_lg = (uint8_t)(((EXIT_SLOW_PCT > 0u) && (EXIT_SLOW_PCT < 100u) && (s_ex_done == 0u) &&
-                                (od_lg >= (int32_t)GOURD_EXIT_FROM_MM) &&
-                                (od_lg <  (int32_t)(GOURD_EXIT_FROM_MM + GOURD_EXIT_SLOW_MM))) ? 1u : 0u);
+                                (od_lg >= (int32_t)GOURD_EXIT_FROM_MM)
+#if EXIT_SLOW_WIN_EN
+                                && (od_lg < (int32_t)(GOURD_EXIT_FROM_MM + GOURD_EXIT_SLOW_MM))
+#endif
+                                ) ? 1u : 0u);
     int16_t dsp = (int16_t)(sp - s_spl_sp);
     /* ★触发条件两选一：① sp 跳 ≥SPD_LOG_STEP 档；② "50% 减速"的开关状态变了 ——
        ★后者必须单独判：50% 是压在最末级 PWM 上的、`sp` 不变，只看 sp 会把它漏掉，
