@@ -14,6 +14,15 @@
 /* ★R40（用户要求）：自动跑 AUTO_RUN_MS 毫秒后自动停车的计时起点 */
 static uint32_t s_auto_t0 = 0u;
 
+/* ★R155（他："葫芦弯出口代码触发时给那 3 个 LED 流水灯效果"）：
+   流水灯要跑 GSP_EXIT_LED_MS 毫秒，比"出口右转"本身（250ms）长 ⇒ 得自己记住起点、自己收工。
+   t0 = 出口触发那一拍的时刻；busy = 效果还在跑；prev = 上一拍的出口状态（做**上升沿**判定 ⇒ 一趟只起一次）。 */
+#if (GSP_EXIT_LED != 0)
+static uint32_t s_gsp_exit_t0   = 0u;
+static uint8_t  s_gsp_exit_busy = 0u;
+static uint8_t  s_gsp_exit_prev = 0u;
+#endif
+
 #define CD_STEPS   3u   /* 读秒步数 = 灯数 */
 #define EMG_EXIT_HOLD_MS 2000u   /* ★2026-09-22：在急停里按住 2 秒 → 回待机（不再只能断电） */
 
@@ -285,30 +294,72 @@ void car_fsm_run(uint32_t dt_ms)
 
     line_follow_control(base_speed);
 
-    /* ★★★ 2026-10-16（1016-R148）【切点窗口的 LED 快闪指示】—— 他要的（跑车时串口看不到）★★★
-       他在指定槽的里程窗口开着时，让三灯快闪（例：切点2 的窗口期）。
-       ⚠️ 必须写在这里（line_follow_control 之后）—— FSM 每拍都写 LED3（运行中常亮）/LED2（丢线闪），
-          写在 line_follow 里会被它盖掉 ⇒ 只有在这里写才看得见。
-       ★改哪个槽快闪：app_config.h 的 GSP_BLINK_MASK（bit0=切点1 / bit1=切点2 / bit2=切点3）；
-         闪烁频率由 GSP_BLINK_MS 定（三灯一起，亮/灭各半周期）。 */
-#if ((GSP_LED_MASK != 0) || (GSP_EXIT_LED != 0))
-    /* ★R154【触发状态的 LED 指示】—— 他："这个可以用 3 个 LED 流水灯表示触发状态"
-       · 三个切点：哪个【方向窗口】开着就点哪个灯（过葫芦时 1→2→3 依次亮 = 流水灯）；
-       · 出口：右转那 250ms 内 ⇒ 三灯全亮（把"出口到底什么时候触发"直接看见）。
-       ⚠️ 必须写在 line_follow_control() 之后 —— FSM 每拍写 LED3（运行中常亮）、boost 会写三灯，
-          写在这里才盖得住、才看得见。 */
+    /* ★★★ 2026-10-16（1016-R148 → R155）【切点窗口 / 出口触发的 LED 指示】—— 他要的（跑车时串口看不到）★★★
+       R148 先做"指定槽的窗口期 ⇒ 三灯快闪"；R154 曾改成"哪个窗口亮哪个灯"；R155 起**两套并存**，见下面总表。 */
+#if ((GSP_LED_MASK != 0) || (GSP_EXIT_LED != 0) || (GSP_BLINK_MASK != 0))
+    /* ★★★ 2026-10-16（1016-R155）【跑车时"看不见串口"的 LED 指示总表】—— 按优先级从高到低 ★★★
+       ① 葫芦弯出口**触发** ⇒ **三灯流水灯**（LED1→LED2→LED3 逐个亮，跑 GSP_EXIT_LED_MS 后收工）
+       ② 切点窗口 ⇒ **三灯同时闪烁**（`GSP_BLINK_MASK` 选槽；他要用它判断"窗口准不准"）
+       ③ 三个切点 ⇒ **哪个窗口开着就点哪个灯**（过葫芦时 1→2→3 依次亮）
+       ⚠️ 必须写在 line_follow_control() 之后 —— FSM 每拍写 LED3（运行中常亮）/LED2（丢线闪），
+          boost 还会写三灯 ⇒ 只有写在这里才盖得住、才看得见。
+       ⚠️ ①② 在"该灭"的那些拍必须**主动写 0**（否则 LED3 的常亮会漏出来 ⇒ 看起来不是"全灭"，
+          而是"只灭了一半"，那样就数不清窗口的两头了）。
+       ★改哪个槽闪 / 出口效果多长 → app_config.h 的 GSP_BLINK_MASK / GSP_EXIT_LED_MS。 */
     {
-      uint8_t leds = 0u;
+      uint8_t leds    = 0u;   /* 本拍要写进三灯的值 */
+      uint8_t must_wr = 0u;   /* 1 = 本拍必须写（哪怕值是 0 —— 那是"故意灭"）*/
+
 #if (GSP_EXIT_LED != 0)
-      if (line_follow_exit_active() != 0u) { leds = 0x07u; }        /* 出口右转中 ⇒ 三灯全亮 */
-      else
+      /* ① 出口触发的流水灯（最高优先级） */
+      {
+        uint8_t ea = line_follow_exit_active();
+        if ((ea != 0u) && (s_gsp_exit_prev == 0u)) { s_gsp_exit_t0 = now; s_gsp_exit_busy = 1u; }   /* 上升沿 = 出口代码刚触发 */
+        s_gsp_exit_prev = ea;
+        if (s_gsp_exit_busy != 0u)
+        {
+          uint32_t stepms = (uint32_t)GSP_EXIT_LED_STEP_MS;
+          uint32_t el     = (uint32_t)(now - s_gsp_exit_t0);
+          if (stepms == 0u) { stepms = 200u; }
+          if (el < (uint32_t)GSP_EXIT_LED_MS)
+          {
+            leds    = (uint8_t)(0x01u << ((el / stepms) % 3u));   /* 0→1→2→0 … 每颗只亮一颗 = 流水灯 */
+            must_wr = 1u;
+          }
+          else { s_gsp_exit_busy = 0u; }                          /* 跑够 ⇒ 收工，交回普通指示 */
+        }
+      }
 #endif
-#if (GSP_LED_MASK != 0)
-      { leds = (uint8_t)(line_follow_gsp_dir_mask() & (uint8_t)GSP_LED_MASK); }
+
+#if (GSP_BLINK_MASK != 0)
+      /* ② 切点窗口的三灯同闪 */
+      if (must_wr == 0u)
+      {
+        uint8_t bsrc;
+#if (GSP_BLINK_SRC_NARROW != 0)
+        bsrc = line_follow_gsp_win_mask();   /* 窄信标（±GSP_BLINK_WIN_MM）—— 用来看"中心对准没有" */
 #else
-      { leds = 0u; }
+        bsrc = line_follow_gsp_dir_mask();   /* 方向窗口（±GSP_WIN3_MM）—— 默认，和"只许一个方向"同一段 */
 #endif
-      if (leds != 0u) { led_mask(leds); }
+        if ((bsrc & (uint8_t)GSP_BLINK_MASK) != 0u)
+        {
+          uint32_t half = (uint32_t)(GSP_BLINK_MS / 2u);
+          if (half == 0u) { half = 25u; }
+          leds    = ((now / half) & 1u) ? 0x00u : 0x07u;   /* 三灯**一起**：亮半周期 / 灭半周期 */
+          must_wr = 1u;
+        }
+      }
+#endif
+
+#if (GSP_LED_MASK != 0)
+      /* ③ 静态指示：哪个切点窗口开着就点哪个灯（不主动写"灭" ⇒ 没窗口时把 LED2 丢线/LED3 常亮让回去）*/
+      if ((must_wr == 0u) && (leds == 0u))
+      {
+        leds = (uint8_t)(line_follow_gsp_dir_mask() & (uint8_t)GSP_LED_MASK);
+      }
+#endif
+
+      if ((must_wr != 0u) || (leds != 0u)) { led_mask(leds); }
     }
 #endif
 
