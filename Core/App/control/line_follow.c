@@ -404,6 +404,13 @@ static uint16_t start_blind = 0;
 /* ★2026-10-08（1008-R21）里程闸门的状态（依据/标定/风险见 app_config.h 的 GOURD_ARM_MM）*/
 static uint8_t s_gourd_armed = 0u;   /* 1 = 里程已越过阈值 ⇒ 启用葫芦圈那套逻辑 */
 #endif
+
+#if GOURD_SPD_WIN_EN
+/* ★2026-10-16（1016-R130）【葫芦段降速窗口】的状态 —— 方案/依据/回退见 app_config.h 的长注释。
+   用【锁存】而不是每拍比大小：OD 是"净里程"（车倒退时它会变小）⇒ 水平比较会在边界抖动。 */
+static uint8_t s_gsw_active = 0u;    /* 1 = 在降速窗口内（进圈后）*/
+static uint8_t s_gsw_done   = 0u;    /* 1 = 本趟已出窗口 ⇒ 不再进（每趟由 rearm 复位）*/
+#endif
 #if USE_GOURD_EXIT_ZONE
 /* ★2026-10-08（1008-R22/R23）出圈"里程窗口+图案"判据⑤的状态 */
 static uint8_t  s_gourd_done = 0u;   /* 1 = 本次已出圈转过 ⇒ 葫芦圈逻辑全部关掉（里程闸门也跟着关）*/
@@ -563,6 +570,29 @@ void line_follow_control(int16_t base)
                    && (s_gourd_done == 0u)      /* ★R22：出圈转过之后，整套葫芦圈逻辑一起关掉 */
 #endif
                   ) ? 1u : 0u;
+#endif
+
+#if GOURD_SPD_WIN_EN
+  /* ★★★ 2026-10-16（1016-R130）【葫芦段降速窗口】的推进 —— 他定的方案（见 app_config.h 长注释）★★★
+     进：OD ≥ GOURD_SPD_FROM_MM（11176 = 他四次实测的均值）⇒ 窗口开
+     出：OD ≥ GOURD_SPD_TO_MM（暂用出口门槛 12844；他实测出口点后替换）⇒ 窗口关、本趟不再进
+     ★两个方向都只认【里程】（只增不减的判据，不依赖 IG/图案）；
+     ★写在 s_gourd_armed 之后、速度块之前 —— 本拍的速度选择与提速块都要用它。 */
+  {
+    int32_t od_now = odom_distance_mm();
+    if (s_gsw_done == 0u)
+    {
+      if (s_gsw_active == 0u)
+      {
+        if (od_now >= (int32_t)GOURD_SPD_FROM_MM) s_gsw_active = 1u;
+      }
+      else if (od_now >= (int32_t)GOURD_SPD_TO_MM)
+      {
+        s_gsw_active = 0u;
+        s_gsw_done   = 1u;
+      }
+    }
+  }
 #endif
 
 #if USE_GOURD_OPENLOOP
@@ -1196,13 +1226,28 @@ void line_follow_control(int16_t base)
        副作用为零（圈外逻辑完全没动）。回退：删掉 `&& (!ge_in_gourd)` 与后面的 else 分支。 */
   int16_t sp = base;
 #if USE_ADAPTIVE_SPEED
+  /* ★2026-10-16（1016-R130）【葫芦段降速窗口】= 等价于"进窗口自动发一次 S 36、出窗口恢复你的 S"：
+     只把这两档的【取值】换掉（下面是 sp_s/sp_c 两个局部量），
+     下面所有判据（丢线 / 误差大 / 圈内相切点 / 圈外直道）原样照走。
+     ⇒ 圈内自然走"弯道档 = GOURD_SPD_CURVE(24)"（含相切点，IG 保护照旧生效）；
+     ⇒ 不改全局 sp_straight/sp_curve ⇒ 不用管"恢复"和"窗口中途改 S"的边角。
+     回退：GOURD_SPD_WIN_EN 改 0（本段整体失效）。 */
+  int16_t sp_s = sp_straight;
+  int16_t sp_c = sp_curve;
+#if GOURD_SPD_WIN_EN
+  if (s_gsw_active != 0u)
+  {
+    sp_s = (int16_t)GOURD_SPD_STRAIGHT;
+    sp_c = (int16_t)GOURD_SPD_CURVE;
+  }
+#endif
   if (r.active == 0)
   {
-    sp = sp_curve;                    /* 丢线先减速 */
+    sp = sp_c;                        /* 丢线先减速 */
   }
   else if (e >= CURVE_ABS_ERR_THRESH || e <= -CURVE_ABS_ERR_THRESH)
   {
-    sp = sp_curve;                    /* 误差大 = 弯道, 减速 */
+    sp = sp_c;                        /* 误差大 = 弯道, 减速 */
   }
 #if (USE_GOURD_EXIT_ZONE && GOURD_EXIT_SLOW_EN)
   /* ★R22【减速区】（本版默认关）：进入出口预备区后降速，让 T 形口有更多拍数可看、
@@ -1214,11 +1259,11 @@ void line_follow_control(int16_t base)
 #endif
   else if (!ge_in_gourd)
   {
-    sp = sp_straight;                 /* 直道（★只在圈外才认直道） */
+    sp = sp_s;                        /* 直道（★只在圈外才认直道） */
   }
   else
   {
-    sp = sp_curve;                    /* ★圈内：e≈0 是相切点，不是直道 → 保持弯道速度 */
+    sp = sp_c;                        /* ★圈内：e≈0 是相切点，不是直道 → 保持弯道速度 */
   }
 #endif
 
@@ -1346,7 +1391,17 @@ void line_follow_control(int16_t base)
      出后：冷却 STRAIGHT_BOOST_COOLDOWN(50 拍=0.5s) 内不许重新进入 ⇒ 灭掉"冲-慢-冲"打摆
      其余（150 拍 / 40 / 斜坡 2）与 R121 完全一致；回退 = EXIT_ERR 改 2 且 COOLDOWN 改 0。 */
   {
-    uint8_t boost_ok = (uint8_t)((r.active > 0u) && (!on_cross) && (!wide_long) && (!line_lost));
+    /* ★2026-10-16（1016-R130）：葫芦段降速窗口内【不许提速】—— 他定的方案第 4 条。
+       为什么必须一起禁：提速目标是【常量】（STRAIGHT_BOOST_SPEED），与 S 档无关
+         ⇒ 不禁它，窗口内的 36/24 会在"连续 15 拍 |e|≤3"之后被它顶到 40/57（圈里冲一下）。
+       进窗口时也自动松掉"已激活"的提速：boost_ok=0 会走下面那条【退出】路径
+         （boost_active=0 + 冷却 50 拍 + 灭三灯）⇒ 不需要额外代码。
+       回退：GOURD_SPD_WIN_EN 改 0。 */
+    uint8_t boost_ok = (uint8_t)((r.active > 0u) && (!on_cross) && (!wide_long) && (!line_lost)
+#if GOURD_SPD_WIN_EN
+                                 && (s_gsw_active == 0u)
+#endif
+                                );
 
     if (boost_active)
     {
@@ -3469,6 +3524,11 @@ void line_follow_gourd_rearm(void)
 {
 #if USE_GOURD_EXIT
   ge_fired = 0u;
+#endif
+#if GOURD_SPD_WIN_EN
+  /* ★1016-R130：葫芦段降速窗口也要每趟复位（否则第二趟一上来就在"已出窗口"状态里） */
+  s_gsw_active = 0u;
+  s_gsw_done   = 0u;
 #endif
 #if USE_START_BLIND
   /* ★每趟起步的瞬间装载"盲直行"：这里正是 FSM 读完秒、清零里程、进 RUN 的那一处
