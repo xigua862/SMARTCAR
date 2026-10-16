@@ -420,13 +420,20 @@ static uint8_t s_sw_active[SPD_WIN_N];   /* 1 = 该槽在窗口内 */
 static uint8_t s_sw_done[SPD_WIN_N];     /* 1 = 本趟该槽已出窗口 ⇒ 不再进 */
 static uint8_t s_sw_any = 0u;            /* 任一槽在窗口内（速度块 / 提速块读它）*/
 static int16_t s_sw_spd = 0;             /* 当前生效的窗口速度（重叠时取表里靠后的）*/
+#if START_SMOOTH_EN
+static uint8_t s_sw_idx = 0xFFu;         /* ★R157：当前生效的是【哪一槽】（0xFF = 没有）——
+                                            给"起步平滑"用：只有槽① 要走斜坡，别的槽仍是常量。
+                                            ★整体罩在 #if 里：关掉平滑就不会"赋了没人读"（ARMCC 会报警告）*/
+#endif
 
-/* 速度窗口表：{进(mm), 出(mm), 该窗口的速度} —— 顺序即优先级（靠后者覆盖前面的）*/
+/* 速度窗口表：{进(mm), 出(mm), 该窗口的速度} —— 顺序即优先级（靠后者覆盖前面的）
+   ★R157：加了第 4 槽"终点前降速"（默认关：from/to 都 0 ⇒ 上面 `to <= from` 那句直接跳过它）。*/
 typedef struct { int32_t from_mm; int32_t to_mm; int16_t spd; } spdwin_t;
 static const spdwin_t s_spdwin[SPD_WIN_N] = {
   { LAUNCH_FROM_MM,  LAUNCH_TO_MM,  LAUNCH_SPD  },
   { CORNER1_FROM_MM, CORNER1_TO_MM, CORNER1_SPD },
-  { CORNER2_FROM_MM, CORNER2_TO_MM, CORNER2_SPD }
+  { CORNER2_FROM_MM, CORNER2_TO_MM, CORNER2_SPD },
+  { FINAL_FROM_MM,   FINAL_TO_MM,   FINAL_SPD   }
 };
 #endif
 #if USE_GOURD_EXIT_ZONE
@@ -700,6 +707,9 @@ void line_follow_control(int16_t base)
     uint8_t si;
     s_sw_any = 0u;
     s_sw_spd = 0;
+#if START_SMOOTH_EN
+    s_sw_idx = 0xFFu;
+#endif
     for (si = 0u; si < (uint8_t)SPD_WIN_N; si++)
     {
       int32_t from = s_spdwin[si].from_mm;
@@ -713,7 +723,8 @@ void line_follow_control(int16_t base)
           s_sw_active[si] = 1u;
           telemetry_msg((si == 0u) ? "SPD-WIN 1 set (launch)"
                         : (si == 1u) ? "SPD-WIN 2 set (corner1)"
-                                     : "SPD-WIN 3 set (corner2)");
+                        : (si == 2u) ? "SPD-WIN 3 set (corner2)"
+                                     : "SPD-WIN 4 set (finish)");
         }
       }
       else if (od_now >= to)
@@ -722,12 +733,16 @@ void line_follow_control(int16_t base)
         s_sw_done[si]   = 1u;
         telemetry_msg((si == 0u) ? "SPD-WIN 1 done"
                       : (si == 1u) ? "SPD-WIN 2 done"
-                                   : "SPD-WIN 3 done");
+                      : (si == 2u) ? "SPD-WIN 3 done"
+                                   : "SPD-WIN 4 done");
       }
       if (s_sw_active[si] != 0u)
       {
         s_sw_any = 1u;
         s_sw_spd = s_spdwin[si].spd;                        /* 靠后的槽覆盖前面的 */
+#if START_SMOOTH_EN
+        s_sw_idx = si;                                      /* ★R157：记住是哪一槽 */
+#endif
       }
     }
   }
@@ -1454,11 +1469,27 @@ void line_follow_control(int16_t base)
 #endif
 #if SPD_WIN_EN
   /* ★1016-R133/R135【速度窗口表】：窗口内两档都换成该窗口的速度（与葫芦窗口同款写法）。
-     ⚠️ 放在葫芦窗口之后：万一两者重叠（现实中不重叠）以本窗口为准。 */
+     ⚠️ 放在葫芦窗口之后：万一两者重叠（现实中不重叠）以本窗口为准。
+     ★R157：槽①（起步）不直接给常量，走"平滑斜坡" —— 见 app_config.h 的 START_SMOOTH_EN。 */
   if (s_sw_any != 0u)
   {
-    sp_s = s_sw_spd;
-    sp_c = s_sw_spd;
+    int16_t win_spd = s_sw_spd;
+#if START_SMOOTH_EN
+    if (s_sw_idx == 0u)                      /* 只有槽①起步走斜坡 */
+    {
+      int32_t od_r = odom_distance_mm();
+      if (od_r < 0) { od_r = 0; }
+      if (od_r < (int32_t)START_RAMP_MM)
+      {
+        /* 线性：START_RAMP_PWM → LAUNCH_SPD，按里程比例（od=0 时是起点值）*/
+        int32_t span = (int32_t)LAUNCH_SPD - (int32_t)START_RAMP_PWM;
+        win_spd = (int16_t)((int32_t)START_RAMP_PWM + (span * od_r) / (int32_t)START_RAMP_MM);
+      }
+      else { win_spd = (int16_t)LAUNCH_SPD; }
+    }
+#endif
+    sp_s = win_spd;
+    sp_c = win_spd;
   }
 #endif
   if (r.active == 0)
@@ -2631,6 +2662,18 @@ void line_follow_control(int16_t base)
       }
     }
   }
+#endif
+#if START_STRAIGHT_EN
+  /* ★★★ 2026-10-16（1016-R157）【起步"硬走直线"】—— 他："发车给个…硬走直线，
+     不然翘头加斑马线很容易就乱了" ★★★
+     做法：里程 < START_STRAIGHT_MM 期间，**误差直接压 0**（不看传感器、不改方向）。
+     ⚠️ 位置：误差整形链的【最后】（接管 / G7 / 单向阀 全都算完之后）⇒ 那一段谁都抢不走方向盘。
+     ⚠️ 为什么必须压到最后：起步那 0.5 秒里"翘头导致传感器读数乱"+"斑马线（一大片白）"两件事叠一起，
+        任何一条判据（十字 / 分支口接管）都可能让它猛打一把方向 ⇒ 节奏从第一步就乱。
+     ★副作用（已知、可接受）：这一段里 `last_e` 也一直是 0 ⇒ 万一刚出这一段就丢线，
+        "丢线用 last_error 加倍修正"那套拿到的也是 0（= 继续走直），对起步段来说是好事。
+     ★回退：START_STRAIGHT_EN 改 0。 */
+  if (odom_distance_mm() < (int32_t)START_STRAIGHT_MM) { e = 0; }
 #endif
   int16_t d_term = (int16_t)(e - last_e);
   /* ★★★ 2026-10-08（1008-R31）【葫芦圈内降低 KP】—— 用户要求 ★★★
