@@ -511,13 +511,16 @@ static uint8_t s_be_flip_done    = 0u;   /* ★R36：本回合是否已翻过（
  * ========================================================================== */
 static uint8_t s_gsp_anchored = 0u;    /* 1 = 本趟已记下进圈锚 */
 static int32_t s_gsp_base     = 0;     /* 进圈锚（mm，从发车算）*/
+static uint8_t s_gsp_win_mask = 0u;    /* ★R148：本拍哪些切点窗口开着（bit0=①/bit1=②/bit2=③）—— 给 LED 快闪用 */
+
+/* 三个切点表的"偏移 / 方向 / 半宽"（提到文件作用域：每拍算窗口掩码也要用）*/
+static const int32_t k_gsp_ctr[3] = { (int32_t)GSP_CUT1_MM, (int32_t)GSP_CUT2_MM, (int32_t)GSP_CUT3_MM };
+static const int8_t  k_gsp_dir[3] = { (int8_t)GSP_DIR1, (int8_t)GSP_DIR2, (int8_t)GSP_DIR3 };
+static const int32_t k_gsp_win[3] = { (int32_t)GSP_WIN1_MM, (int32_t)GSP_WIN2_MM, (int32_t)GSP_WIN3_MM };
 
 /* 返回 +1 = 选左侧 / -1 = 选右侧 / 0 = 不在任何切点窗口内 */
 static int8_t gsp_dir_for(int32_t od)
 {
-  static const int32_t k_ctr[3] = { (int32_t)GSP_CUT1_MM, (int32_t)GSP_CUT2_MM, (int32_t)GSP_CUT3_MM };
-  static const int8_t  k_dir[3] = { (int8_t)GSP_DIR1, (int8_t)GSP_DIR2, (int8_t)GSP_DIR3 };
-  static const int32_t k_win[3] = { (int32_t)GSP_WIN1_MM, (int32_t)GSP_WIN2_MM, (int32_t)GSP_WIN3_MM };
   int32_t best = 0x7FFFFFFF;
   int32_t win  = 0;
   int8_t  side = 0;
@@ -527,12 +530,18 @@ static int8_t gsp_dir_for(int32_t od)
   od -= s_gsp_base;                                /* 相对进圈点 */
   for (i = 0u; i < 3u; i++)
   {
-    int32_t d = od - (k_ctr[i] - (int32_t)GSP_BIAS_MM);
+    int32_t d = od - (k_gsp_ctr[i] - (int32_t)GSP_BIAS_MM);
     if (d < 0) d = -d;
-    if (d < best) { best = d; side = k_dir[i]; win = k_win[i]; }   /* 取最近的那个切点 */
+    if (d < best) { best = d; side = k_gsp_dir[i]; win = k_gsp_win[i]; }   /* 取最近的那个切点 */
   }
   if (best > win) return 0;                        /* 最近的那个也在它的窗口外 ⇒ 不管 */
   return side;
+}
+
+/* ★R148：本拍哪些切点窗口开着（bit0..2）—— 给 FSM 做 LED 快闪指示用（他："第二个切点的窗口期你给 LED 快闪"）*/
+uint8_t line_follow_gsp_win_mask(void)
+{
+  return s_gsp_win_mask;
 }
 #endif
 
@@ -714,11 +723,27 @@ void line_follow_control(int16_t base)
 
 #if GS_PHASE_EN
   /* ★1016-R145【乙：里程定方向】锚的维护 —— 第一个 OD ≥ GOURD_SPD_FROM_MM(11176) 的拍当锚。
-     ★必须每拍都跑（不能等"接管接受"时才记，否则锚会晚一大截 ⇒ 后面所有窗口都偏）。 */
-  if ((s_gsp_anchored == 0u) && (odom_distance_mm() >= (int32_t)GOURD_SPD_FROM_MM))
+     ★必须每拍都跑（不能等"接管接受"时才记，否则锚会晚一大截 ⇒ 后面所有窗口都偏）。
+     ★R148：顺便算出"本拍哪些切点窗口开着"（bit0..2）—— 给 FSM 的 LED 快闪指示用。 */
   {
-    s_gsp_base     = odom_distance_mm();
-    s_gsp_anchored = 1u;
+    int32_t gwin_od = odom_distance_mm();
+    if ((s_gsp_anchored == 0u) && (gwin_od >= (int32_t)GOURD_SPD_FROM_MM))
+    {
+      s_gsp_base     = gwin_od;
+      s_gsp_anchored = 1u;
+    }
+    s_gsp_win_mask = 0u;
+    if (s_gsp_anchored != 0u)
+    {
+      uint8_t wi;
+      int32_t rel = gwin_od - s_gsp_base;
+      for (wi = 0u; wi < 3u; wi++)
+      {
+        int32_t dd = rel - (k_gsp_ctr[wi] - (int32_t)GSP_BIAS_MM);
+        if (dd < 0) dd = -dd;
+        if (dd <= k_gsp_win[wi]) { s_gsp_win_mask |= (uint8_t)(1u << wi); }
+      }
+    }
   }
 #endif
 

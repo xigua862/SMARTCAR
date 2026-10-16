@@ -285,6 +285,21 @@ void car_fsm_run(uint32_t dt_ms)
 
     line_follow_control(base_speed);
 
+    /* ★★★ 2026-10-16（1016-R148）【切点窗口的 LED 快闪指示】—— 他要的（跑车时串口看不到）★★★
+       他在指定槽的里程窗口开着时，让三灯快闪（例：切点2 的窗口期）。
+       ⚠️ 必须写在这里（line_follow_control 之后）—— FSM 每拍都写 LED3（运行中常亮）/LED2（丢线闪），
+          写在 line_follow 里会被它盖掉 ⇒ 只有在这里写才看得见。
+       ★改哪个槽快闪：app_config.h 的 GSP_BLINK_MASK（bit0=切点1 / bit1=切点2 / bit2=切点3）；
+         闪烁频率由 GSP_BLINK_MS 定（三灯一起，亮/灭各半周期）。 */
+#if (GSP_BLINK_MASK != 0)
+    if ((line_follow_gsp_win_mask() & (uint8_t)GSP_BLINK_MASK) != 0u)
+    {
+      uint32_t half = (uint32_t)(GSP_BLINK_MS / 2u);
+      if (half == 0u) { half = 25u; }
+      led_mask((uint8_t)(((now / half) & 1u) ? 0x07u : 0x00u));
+    }
+#endif
+
     /* TODO(终点): 图案 + 里程双条件成立 → car_fsm_finish() */
     break;
 
