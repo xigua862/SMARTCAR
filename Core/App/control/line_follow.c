@@ -2523,9 +2523,27 @@ void line_follow_control(int16_t base)
       e = (int8_t)((int16_t)e - (int16_t)G7_LEFT_BIAS);
     }
   }
+#if C2_SPECIAL_EN
+  /* ★1016-R141【切点2 特殊处理】—— 他："我们切点2特殊处理好了，反正现在有数据"。
+     为什么：切点2 的图案常是全灭或"居中偏右的一坨"（e≈+4）⇒ 老的接管（要两坨/一坨≥5）多半不触发
+       ⇒ 那一下只有 PD 自己在出力，差速太弱 ⇒ 换不到下一个圆 = "没识别到/总误判"。
+     做法（照 G7_LEFT 的先例）：里程窗口内给 e 加一个"向右"的偏置，把 PD 往右压一把。
+     ★只在葫芦圈里（里程闸门）且只在窗口内生效 ⇒ 圈外与圈内其余路段完全不受影响 ✓。
+     ★调参只调 C2_EDGE（还不够 ⇒ 8~10；转过头 ⇒ 4）；早晚调 C2_BIAS。回退：C2_SPECIAL_EN=0。 */
+  if (s_gourd_armed != 0u)
+  {
+    int32_t c2od = odom_distance_mm();
+    int32_t c2c  = (int32_t)C2_MM - (int32_t)C2_BIAS;
+    if ((c2od >= (c2c - (int32_t)C2_WIN)) && (c2od <= (c2c + (int32_t)C2_WIN)))
+    {
+      e = (int8_t)((int16_t)e + (int16_t)C2_EDGE);
+    }
+  }
+#endif
 #if GS_ENABLE
   /* ★1016-R137【甲方案单向阀】：放在这里 = 误差整形链的最末（PD 之前），有最终说话权。
-     命中切点窗口 ⇒ 与"该切点方向"相反那一侧的误差清零（只许往那侧转/直行）。 */
+     命中切点窗口 ⇒ 与"该切点方向"相反那一侧的误差清零（只许往那侧转/直行）。
+     ★1016-R141：他要求"恢复到老版本 + 切点2 特殊处理" ⇒ 本方案已用 GS_ENABLE=0 关掉（代码留着）。 */
   e = gourd_sched_apply(e);
 #endif
   int16_t d_term = (int16_t)(e - last_e);
