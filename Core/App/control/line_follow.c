@@ -524,7 +524,22 @@ void line_follow_control(int16_t base)
       uint8_t fn_raw = (uint8_t)(fnr.raw & 0xFFu);
       uint8_t fn_lit = 0u, fn_i;
       for (fn_i = 0u; fn_i < 8u; fn_i++) { if (((fn_raw >> fn_i) & 1u) != 0u) { fn_lit++; } }
-      if (fn_lit >= (uint8_t)EXIT_ANOM_LIT_MIN) { s_fin_state = 1u; s_fin_fr = 0u; }
+      if (fn_lit >= (uint8_t)EXIT_ANOM_LIT_MIN)
+      {
+#if EXIT_FINISH_DIRECT_STOP
+        /* ★2026-10-16（1016-R144）【直接停车】—— 他："改成直接停车，我们停车偏移严重"。
+           老行为是"再正常前进 1 秒"（57 档 ≈ 1.1m）⇒ 停点整体偏后太多。
+           现在：里程 + 异常一命中 ⇒ 直接进"已停车"（电机命令 0 + 每拍保持）。
+           ⚠️ 仍是"滑行"（0 命令 = 两个方向脚都低 = coast，不是刹车）⇒ 还会往前滑一段；
+              要再收紧就用 `TIK` 量实际停点、把 EXIT_FINISH_MM 往前挪。
+           ★回退：EXIT_FINISH_DIRECT_STOP 改 0（回到老行为）。 */
+        s_fin_state = 2u;
+        s_fin_fr    = 0u;
+#else
+        s_fin_state = 1u;
+        s_fin_fr    = 0u;
+#endif
+      }
     }{
     if (s_ex_done == 0u)
     {
