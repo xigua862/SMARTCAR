@@ -378,8 +378,8 @@ void telemetry_report(void)
          IR / RPM / OD / GZ / AR / AN / IG
        删掉：ST=（跑车中恒为 2）、GW=/SAT=/SATN=（本次不查，要查时从 git 历史恢复）。
        AR/AN 定义见 line_follow.h；AR 阈值 = GOURD_ARC_FLIP_MDEG。 */
-    "FW:%s IR:%s RPM %d/%d P %d/%d C %d S %d OD %ld GZ %d IG %d\r\n",
-    FW_TAG, ir,
+    "FW:%s TIM:%lu IR:%s RPM %d/%d P %d/%d C %d S %d OD %ld GZ %d IG %d\r\n",
+    FW_TAG, (unsigned long)HAL_GetTick(), ir,
     speed_get_rpm(MOTOR_LEFT), speed_get_rpm(MOTOR_RIGHT),
     (int)pwm_l, (int)pwm_r,           /* ★P: 真正下发的 PWM（本函数顶部有判据说明）*/
     (int)be_cor,                      /* ★C: 本拍差速修正 corr（±99 夹过）*/
@@ -440,8 +440,8 @@ void telemetry_print_full(void)
        ST=、DT=、GW=、SB=、G7=、GX=、GR=、CX=、BR=、GE=、GD=、EH=、MX=
      AR/AN 定义见 line_follow.h；AR 阈值 = GOURD_ARC_FLIP_MDEG = 320000。 */
   int n = snprintf(buf, sizeof(buf),
-    "FW:%s IR:%s RPM %d/%d PWM %d/%d OD %ld GZ %d IG %d AR %ld AN %u\r\n",
-    FW_TAG, ir,
+    "FW:%s TIM:%lu IR:%s RPM %d/%d PWM %d/%d OD %ld GZ %d IG %d AR %ld AN %u\r\n",
+    FW_TAG, (unsigned long)HAL_GetTick(), ir,
     speed_get_rpm(MOTOR_LEFT), speed_get_rpm(MOTOR_RIGHT),
     (int)pwm_l, (int)pwm_r,          /* ★实际下发的 PWM：和 RPM 对照就知道是谁的问题 */
     (long)odom_distance_mm(),         /* ★OD: 净位移(mm), 从起步算起, 前进为正 */
