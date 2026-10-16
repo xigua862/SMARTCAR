@@ -14,7 +14,9 @@ uint8_t line_follow_is_lost(void);    /* 1 = 持续丢线(正在原地找线) */
 uint8_t line_follow_on_cross(void);   /* 1 = 当前判定为十字(强制直行中) */
 
 uint8_t line_follow_gourd_waves(void);   /* 葫芦弯已识别的相切点个数(0~2, 到3清零) */
-uint8_t line_follow_gsp_win_mask(void);  /* ★R148：本拍哪些切点窗口开着（bit0..2）—— 给 LED 快闪指示用 */
+uint8_t line_follow_gsp_win_mask(void);  /* ★R148：本拍哪些【窄信标】窗口开着（bit0..2）*/
+uint8_t line_follow_gsp_dir_mask(void);  /* ★R154：本拍哪些【方向窗口】开着（bit0..2）—— 流水灯指示用 */
+uint8_t line_follow_exit_active(void);   /* ★R154：出口右转是否正在进行 —— 出口触发的 LED 指示用 */
 uint16_t line_follow_1k_missed(void);    /* ★本窗口 100Hz 漏看了几拍 1kHz 采样(遥测 K1=) */
 /* ★本窗口 1kHz 采样的完整统计（遥测 K1=missed/total 与 MX=maxact/maxraw）。
    ★必须读这个、不要再直接调 line_1k_take —— 那个会清零窗口，

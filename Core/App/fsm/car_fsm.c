@@ -291,12 +291,24 @@ void car_fsm_run(uint32_t dt_ms)
           写在 line_follow 里会被它盖掉 ⇒ 只有在这里写才看得见。
        ★改哪个槽快闪：app_config.h 的 GSP_BLINK_MASK（bit0=切点1 / bit1=切点2 / bit2=切点3）；
          闪烁频率由 GSP_BLINK_MS 定（三灯一起，亮/灭各半周期）。 */
-#if (GSP_BLINK_MASK != 0)
-    if ((line_follow_gsp_win_mask() & (uint8_t)GSP_BLINK_MASK) != 0u)
+#if ((GSP_LED_MASK != 0) || (GSP_EXIT_LED != 0))
+    /* ★R154【触发状态的 LED 指示】—— 他："这个可以用 3 个 LED 流水灯表示触发状态"
+       · 三个切点：哪个【方向窗口】开着就点哪个灯（过葫芦时 1→2→3 依次亮 = 流水灯）；
+       · 出口：右转那 250ms 内 ⇒ 三灯全亮（把"出口到底什么时候触发"直接看见）。
+       ⚠️ 必须写在 line_follow_control() 之后 —— FSM 每拍写 LED3（运行中常亮）、boost 会写三灯，
+          写在这里才盖得住、才看得见。 */
     {
-      uint32_t half = (uint32_t)(GSP_BLINK_MS / 2u);
-      if (half == 0u) { half = 25u; }
-      led_mask((uint8_t)(((now / half) & 1u) ? 0x07u : 0x00u));
+      uint8_t leds = 0u;
+#if (GSP_EXIT_LED != 0)
+      if (line_follow_exit_active() != 0u) { leds = 0x07u; }        /* 出口右转中 ⇒ 三灯全亮 */
+      else
+#endif
+#if (GSP_LED_MASK != 0)
+      { leds = (uint8_t)(line_follow_gsp_dir_mask() & (uint8_t)GSP_LED_MASK); }
+#else
+      { leds = 0u; }
+#endif
+      if (leds != 0u) { led_mask(leds); }
     }
 #endif
 

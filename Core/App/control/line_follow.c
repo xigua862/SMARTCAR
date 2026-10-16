@@ -547,7 +547,13 @@ static int8_t gsp_dir_for(int32_t od)
 /* ★R148：本拍哪些切点窗口开着（bit0..2）—— 给 FSM 做 LED 快闪指示用（他："第二个切点的窗口期你给 LED 快闪"）*/
 uint8_t line_follow_gsp_win_mask(void)
 {
-  return s_gsp_win_mask;
+  return s_gsp_win_mask;      /* 窄（信标）：±GSP_BLINK_WIN_MM */
+}
+
+/* ★R154：宽（方向窗口）掩码 —— 给"3 个 LED 流水灯"用（哪个切点窗口开着就点哪个灯）*/
+uint8_t line_follow_gsp_dir_mask(void)
+{
+  return s_gsp_dir_mask;
 }
 #endif
 
@@ -3608,6 +3614,16 @@ void line_follow_test_stats_dump(void)
 
   telemetry_msg("=================================");
   ts.run = 0;
+}
+
+/* ★R154：出口右转是否正在进行（>0 = 正在那 250ms 的右转里）—— 给"出口触发"的 LED 指示用 */
+uint8_t line_follow_exit_active(void)
+{
+#if USE_GOURD_EXIT
+  return (s_ex_tmr > 0u) ? 1u : 0u;
+#else
+  return 0u;
+#endif
 }
 
 uint8_t line_follow_is_lost(void)
