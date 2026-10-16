@@ -506,7 +506,7 @@ static uint8_t s_be_flip_done    = 0u;   /* ★R36：本回合是否已翻过（
  *  做法：接管【接受的那一刻】，如果 OD 落在某个切点窗口内 ⇒ 直接用该切点的方向（左/右/左）
  *    覆盖相位 `s_be_next_l` 给出的"下次用哪侧"。图案那套翻转照旧（不动它，窗口外仍是老行为）。
  *  ★锚：第一个 OD ≥ GOURD_SPD_FROM_MM(11176) 的拍（每拍维护，见 line_follow_control 里的那一小段）。
- *  ★窗口：±GSP_WIN_MM（180）；中心 = 实测切点偏移 − GSP_BIAS_MM（手点滞后补偿）。
+ *  ★窗口：各自的半宽 `GSP_WIN1/2/3_MM`（R147 起各槽独立）；中心 = 实测切点偏移 − GSP_BIAS_MM（手点滞后补偿）。
  *  ★回退：GS_PHASE_EN 改 0。
  * ========================================================================== */
 static uint8_t s_gsp_anchored = 0u;    /* 1 = 本趟已记下进圈锚 */
@@ -517,7 +517,9 @@ static int8_t gsp_dir_for(int32_t od)
 {
   static const int32_t k_ctr[3] = { (int32_t)GSP_CUT1_MM, (int32_t)GSP_CUT2_MM, (int32_t)GSP_CUT3_MM };
   static const int8_t  k_dir[3] = { (int8_t)GSP_DIR1, (int8_t)GSP_DIR2, (int8_t)GSP_DIR3 };
+  static const int32_t k_win[3] = { (int32_t)GSP_WIN1_MM, (int32_t)GSP_WIN2_MM, (int32_t)GSP_WIN3_MM };
   int32_t best = 0x7FFFFFFF;
+  int32_t win  = 0;
   int8_t  side = 0;
   uint8_t i;
 
@@ -527,9 +529,9 @@ static int8_t gsp_dir_for(int32_t od)
   {
     int32_t d = od - (k_ctr[i] - (int32_t)GSP_BIAS_MM);
     if (d < 0) d = -d;
-    if (d < best) { best = d; side = k_dir[i]; }    /* 取最近的那个切点 */
+    if (d < best) { best = d; side = k_dir[i]; win = k_win[i]; }   /* 取最近的那个切点 */
   }
-  if (best > (int32_t)GSP_WIN_MM) return 0;        /* 最近的在窗口外 ⇒ 不管 */
+  if (best > win) return 0;                        /* 最近的那个也在它的窗口外 ⇒ 不管 */
   return side;
 }
 #endif
