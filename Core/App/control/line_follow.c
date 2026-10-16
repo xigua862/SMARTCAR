@@ -1518,6 +1518,19 @@ void line_follow_control(int16_t base)
 #endif
     if (ge_is_entry_pattern(r.raw)) ig_now = 1u;   /* ② 图案保底（或作对照） */
 
+#if (GOURD_SPD_WIN_EN && GOURD_SPD_FORCE_IG)
+    /* ★★★ 2026-10-16（1016-R131）【用里程把 IG 挂上】—— 他定的方案 ★★★
+       他的原话："我们的里程计应该替代 IG，但不是重写逻辑，应该在里程 ≥11176 的时候就让 IG 挂上，
+                 然后出圈让 IG 正常（照着之前的逻辑）挂 0"。
+       为什么放在这里（改的是 `ig_now`，不是 `ge_in_gourd`）：
+         ⇒ 下面 `if (ig_now)` 那条【原路】照走：进圈记账（ge_odom_entry / mark TTL / 普通线计数复位 /
+            GOURD-ENTRY 日志）全部与"真进圈"一模一样；`else` 那条清印记的路在窗口内根本进不来
+            ⇒ 不会出现"我强制 1、它自己清 0"的来回抖。
+       窗口结束后不再强制 ⇒ IG 回到陀螺判据自己管（连续 100 拍普通线 / TTL 600 拍 ⇒ 挂 0，照旧逻辑）。
+       回退：GOURD_SPD_FORCE_IG 改 0（= 只保留"换档 + 禁提速"）。 */
+    if (s_gsw_active != 0u) ig_now = 1u;
+#endif
+
     if (ig_now)
     {
       ge_plain_cnt = 0u;  /* 重新确认在圈内后，离开计数必须从头连续累计。 */
