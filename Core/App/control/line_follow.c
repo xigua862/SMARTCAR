@@ -412,12 +412,22 @@ static uint8_t s_gsw_active = 0u;    /* 1 = 在降速窗口内（进圈后）*/
 static uint8_t s_gsw_done   = 0u;    /* 1 = 本趟已出窗口 ⇒ 不再进（每趟由 rearm 复位）*/
 #endif
 
-#if CORNER_SPD_WIN_EN
-/* ★2026-10-16（1016-R133）【直角弯前减速窗口】的状态 —— 两个槽位（①开头第一个弯 ②最后的弯）
-   方案/依据/调参方向见 app_config.h 的长注释；与葫芦窗口同款：锁存推进 + 每趟 rearm 复位。 */
-static uint8_t s_cw_active[2] = {0u, 0u};   /* 1 = 该槽在窗口内 */
-static uint8_t s_cw_done[2]   = {0u, 0u};   /* 1 = 本趟该槽已出窗口 ⇒ 不再进 */
-static uint8_t s_cw_any       = 0u;         /* 任一槽在窗口内（速度块 / 提速块读它）*/
+#if SPD_WIN_EN
+/* ★2026-10-16（1016-R133/R135）【速度窗口表】的状态 —— 三个槽（①起步 ②第一个直角弯 ③最后的直角弯）
+   方案/依据/调参方向见 app_config.h 的长注释；与葫芦窗口同款：锁存推进 + 每趟 rearm 复位。
+   （C 的静态变量本来就是 0 起，所以不写初始化列表 —— 免得 SPD_WIN_N 一改就对不上。）*/
+static uint8_t s_sw_active[SPD_WIN_N];   /* 1 = 该槽在窗口内 */
+static uint8_t s_sw_done[SPD_WIN_N];     /* 1 = 本趟该槽已出窗口 ⇒ 不再进 */
+static uint8_t s_sw_any = 0u;            /* 任一槽在窗口内（速度块 / 提速块读它）*/
+static int16_t s_sw_spd = 0;             /* 当前生效的窗口速度（重叠时取表里靠后的）*/
+
+/* 速度窗口表：{进(mm), 出(mm), 该窗口的速度} —— 顺序即优先级（靠后者覆盖前面的）*/
+typedef struct { int32_t from_mm; int32_t to_mm; int16_t spd; } spdwin_t;
+static const spdwin_t s_spdwin[SPD_WIN_N] = {
+  { LAUNCH_FROM_MM,  LAUNCH_TO_MM,  LAUNCH_SPD  },
+  { CORNER1_FROM_MM, CORNER1_TO_MM, CORNER1_SPD },
+  { CORNER2_FROM_MM, CORNER2_TO_MM, CORNER2_SPD }
+};
 #endif
 #if USE_GOURD_EXIT_ZONE
 /* ★2026-10-08（1008-R22/R23）出圈"里程窗口+图案"判据⑤的状态 */
@@ -603,36 +613,47 @@ void line_follow_control(int16_t base)
   }
 #endif
 
-#if CORNER_SPD_WIN_EN
-  /* ★★★ 2026-10-16（1016-R133）【直角弯前减速窗口】的推进 —— 见 app_config.h 的长注释 ★★★
-     两槽：① 开头第一个直角弯（他实测车头到角 1195，窗口 900→1500）
-           ② 最后的直角弯（等他实测后填 CORNER2_*；任一项 ≤0 ⇒ 该槽关闭）
-     两个方向都只认【里程】（锁存推进，不依赖 IG/图案）；写在速度块之前 —— 本拍就要用。 */
+#if SPD_WIN_EN
+  /* ★★★ 2026-10-16（1016-R133/R135）【速度窗口表】的推进 —— 见 app_config.h 的长注释 ★★★
+     三个槽：① 起步限速 0→900 @36（他："一开始就高速容易翘头，先 36 再 57"）
+             ② 第一个直角弯 900→1500 @24（他实测车头到角 1195）
+             ③ 最后的直角弯（等他实测后填 CORNER2_*；任一项 ≤0 ⇒ 该槽关闭）
+     两个方向都只认【里程】（锁存推进，不依赖 IG/图案）；写在速度块之前 —— 本拍就要用。
+     ★重叠时"表里靠后"的槽生效（本表 0→900 与 900→1500 首尾相接，不重叠）。 */
   {
     int32_t od_now = odom_distance_mm();
-    uint8_t i;
-    s_cw_any = 0u;
-    for (i = 0u; i < 2u; i++)
+    uint8_t si;
+    s_sw_any = 0u;
+    s_sw_spd = 0;
+    for (si = 0u; si < (uint8_t)SPD_WIN_N; si++)
     {
-      int32_t from = (i == 0u) ? (int32_t)CORNER1_FROM_MM : (int32_t)CORNER2_FROM_MM;
-      int32_t to   = (i == 0u) ? (int32_t)CORNER1_TO_MM   : (int32_t)CORNER2_TO_MM;
-      if ((from <= 0) || (to <= from)) continue;          /* 该槽未启用 */
-      if (s_cw_done[i] != 0u) continue;                    /* 本趟已过 */
-      if (s_cw_active[i] == 0u)
+      int32_t from = s_spdwin[si].from_mm;
+      int32_t to   = s_spdwin[si].to_mm;
+      if ((from < 0) || (to <= from)) continue;            /* 该槽未启用 */
+      if (s_sw_done[si] != 0u) continue;                   /* 本趟已过 */
+      if (s_sw_active[si] == 0u)
       {
         if (od_now >= from)
         {
-          s_cw_active[i] = 1u;
-          telemetry_msg((i == 0u) ? "CORNER-SLOW 1 set (corner ahead)" : "CORNER-SLOW 2 set");
+          s_sw_active[si] = 1u;
+          telemetry_msg((si == 0u) ? "SPD-WIN 1 set (launch)"
+                        : (si == 1u) ? "SPD-WIN 2 set (corner1)"
+                                     : "SPD-WIN 3 set (corner2)");
         }
       }
       else if (od_now >= to)
       {
-        s_cw_active[i] = 0u;
-        s_cw_done[i]   = 1u;
-        telemetry_msg((i == 0u) ? "CORNER-SLOW 1 done (restore)" : "CORNER-SLOW 2 done");
+        s_sw_active[si] = 0u;
+        s_sw_done[si]   = 1u;
+        telemetry_msg((si == 0u) ? "SPD-WIN 1 done"
+                      : (si == 1u) ? "SPD-WIN 2 done"
+                                   : "SPD-WIN 3 done");
       }
-      if (s_cw_active[i] != 0u) s_cw_any = 1u;
+      if (s_sw_active[si] != 0u)
+      {
+        s_sw_any = 1u;
+        s_sw_spd = s_spdwin[si].spd;                        /* 靠后的槽覆盖前面的 */
+      }
     }
   }
 #endif
@@ -1283,13 +1304,13 @@ void line_follow_control(int16_t base)
     sp_c = (int16_t)GOURD_SPD_CURVE;
   }
 #endif
-#if CORNER_SPD_WIN_EN
-  /* ★1016-R133【直角弯前减速】：窗口内两档都换成 CORNER_SPD（与葫芦窗口同款写法）。
+#if SPD_WIN_EN
+  /* ★1016-R133/R135【速度窗口表】：窗口内两档都换成该窗口的速度（与葫芦窗口同款写法）。
      ⚠️ 放在葫芦窗口之后：万一两者重叠（现实中不重叠）以本窗口为准。 */
-  if (s_cw_any != 0u)
+  if (s_sw_any != 0u)
   {
-    sp_s = (int16_t)CORNER_SPD;
-    sp_c = (int16_t)CORNER_SPD;
+    sp_s = s_sw_spd;
+    sp_c = s_sw_spd;
   }
 #endif
   if (r.active == 0)
@@ -1364,7 +1385,12 @@ void line_follow_control(int16_t base)
        `detected && !det_prev` 恒假，把下面"dup"那条打印优化掉（已验证过）。 */
     uint8_t raw_rising = (detected && !det_prev) ? 1u : 0u;    /* 上升沿（还没过防抖） */
     uint8_t det_rising = (raw_rising && wide_armed) ? 1u : 0u; /* 过了防抖才算真事件 */
-    if (det_rising && (cross_events < 60000u)) cross_events++;
+    /* ★1016-R135【起步忽略特征】：里程 < START_BLANK_MM 期间，十字/宽图案一律不算、
+       也不计入十字事件预算 —— 他："开始的时候有个斑马线会误导小车"
+       （斑马线在起步 ~200mm 处、是一大片白，会被当十字强制直行并吃掉预算）。
+       START_BLANK_MM=0 ⇒ 恒为 0（相当于关闭）。 */
+    uint8_t feat_blank = (odom_distance_mm() < (int32_t)START_BLANK_MM) ? 1u : 0u;
+    if (det_rising && (feat_blank == 0u) && (cross_events < 60000u)) cross_events++;
     det_prev = detected;
 
     uint8_t cross_now = detected;
@@ -1390,6 +1416,14 @@ void line_follow_control(int16_t base)
     }
 #endif
 #endif
+
+    /* ★1016-R135【起步忽略特征】：起步阶段的斑马线不按十字/宽图案处理（事件计数上面也已跳过）
+       ⇒ 那一段完全交回普通 PD 循迹。见 app_config.h 的 START_BLANK_MM 说明。 */
+    if (feat_blank != 0u)
+    {
+      cross_now = 0u;
+      wide_long = 0u;
+    }
 
 #if CROSS_PRINT
     char msg_cross[112];
@@ -1452,8 +1486,8 @@ void line_follow_control(int16_t base)
 #if GOURD_SPD_WIN_EN
                                  && (s_gsw_active == 0u)
 #endif
-#if CORNER_SPD_WIN_EN
-                                 && (s_cw_any == 0u)     /* ★1016-R133：直角弯减速窗口内同样禁提速 */
+#if SPD_WIN_EN
+                                 && (s_sw_any == 0u)     /* ★1016-R133/R135：速度窗口内同样禁提速 */
 #endif
                                 );
 
@@ -3597,11 +3631,18 @@ void line_follow_gourd_rearm(void)
   s_gsw_active = 0u;
   s_gsw_done   = 0u;
 #endif
-#if CORNER_SPD_WIN_EN
-  /* ★1016-R133：直角弯减速窗口（两槽）同样每趟复位 */
-  s_cw_active[0] = 0u; s_cw_active[1] = 0u;
-  s_cw_done[0]   = 0u; s_cw_done[1]   = 0u;
-  s_cw_any       = 0u;
+#if SPD_WIN_EN
+  /* ★1016-R133/R135：速度窗口表（三槽）同样每趟复位 */
+  {
+    uint8_t si;
+    for (si = 0u; si < (uint8_t)SPD_WIN_N; si++)
+    {
+      s_sw_active[si] = 0u;
+      s_sw_done[si]   = 0u;
+    }
+    s_sw_any = 0u;
+    s_sw_spd = 0;
+  }
 #endif
 #if USE_START_BLIND
   /* ★每趟起步的瞬间装载"盲直行"：这里正是 FSM 读完秒、清零里程、进 RUN 的那一处

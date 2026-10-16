@@ -214,6 +214,8 @@ static uint16_t s_tr_i = 0u;   /* 写指针 */
 static uint16_t s_tr_n = 0u;   /* 已写条数 */
 static uint8_t  s_tr_dec = 0u; /* 抽稀计数 */
 static uint8_t  s_dump_quiet = 0u; /* ★回放期间暂停周期遥测（>0 则跳过打印）*/
+static uint8_t  s_dump_suppress = 0u; /* ★1016-R135：一次性"这次别回放"标志（`END` 用它——
+                                         他："这吐的我也没找到有用信息，先把那个关了吧"）*/
 static uint16_t s_dump_cool  = 0u; /* ★回放冷却：刚回放过就不再回放（防两次连发）*/
 
 void telemetry_trace_tick(void)
@@ -329,6 +331,10 @@ void telemetry_trace_dump(void)
      修法：回放设 5 秒冷却；冷却期内再调用直接返回。 */
   if (s_dump_cool > 0u) return;
   s_dump_cool = 500u;              /* 500 拍 × 10ms = 5 秒 */
+
+  /* ★1016-R135：一次性"别回放"标志（`END` 用）—— 他："这吐的我也没找到有用信息，先把那个关了吧"。
+     注意：放在冷却判定【之后】—— 这样它只挡这一次调用，不影响冷却的语义。 */
+  if (s_dump_suppress != 0u) { s_dump_suppress = 0u; return; }
 
   char b[96];
   uint16_t i = (s_tr_n < (uint16_t)TRACE_N) ? 0u : s_tr_i;   /* 环满则从最旧的开始 */
@@ -619,9 +625,10 @@ void telemetry_process_command(void)
       if (mkn > 0) tx_send((const uint8_t*)mkb, (uint16_t)mkn);
     }
     mkn = snprintf(mkb, sizeof(mkb),
-                   "OK MARK END n=%u (LOCKED: hold START 2s; quiet: any cmd resumes)\r\n",
+                   "OK MARK END n=%u (LOCKED: hold START 2s; quiet: any cmd resumes; no trace replay)\r\n",
                    (unsigned)s_mark_n);
     s_mark_n = 0u;                          /* 清空 ⇒ 可接着量第二遍 */
+    s_dump_suppress = 1u;                   /* ★1016-R135：这次急停别回放轨迹（他要的）*/
     car_fsm_emergency_stop_cause(2u);       /* 锁车（与 XX 同一条路径）*/
     if (mkn > 0) tx_send((const uint8_t*)mkb, (uint16_t)mkn);
     return;
