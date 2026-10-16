@@ -688,8 +688,13 @@ void telemetry_process_command(void)
   }
   else if (c == 'Q')                        /* ★轨迹回放（黑匣子）—— 请停下再发 */
   {
+#if USE_TRACE_DUMP_Q
     telemetry_trace_dump();
     n = 0;                                  /* 内容已经打完, 不再另回一行 */
+#else
+    /* ★1016-R136：他要关掉（"这吐的我也没找到有用信息，先把那个关了吧"）*/
+    n = snprintf(buf, sizeof(buf), "Q disabled (trace dump off; see USE_TRACE_DUMP_Q)\r\n");
+#endif
   }
   else if (c == 'H')                        /* 诊断: 完整长行 + 8 路原始位图 + 按键 + 编码器 + IMU */
   {

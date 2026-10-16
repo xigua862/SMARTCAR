@@ -105,8 +105,11 @@ static void enter(car_state_t s)
     /* ★2026-09-24 急停时【自动回放最近 600 拍轨迹】(IR/GZ/OD)。
        为什么：PC→车 的串口方向不通（"只发不收"），TEST/Q 命令发不进来；
        有这一句就**只用按键取数据**：正常发车 → 跑到想看的地方 → 长按急停 1 秒
-       → 车一停就把前 6 秒的 100Hz 轨迹打出来（"车→PC"方向一直是好的）。 */
+       → 车一停就把前 6 秒的 100Hz 轨迹打出来（"车→PC"方向一直是好的）。
+       ★1016-R136：他要求关掉（"这吐的我也没找到有用信息，先把那个关了吧"）⇒ 用宏罩住。 */
+#if USE_TRACE_DUMP_EMG
     telemetry_trace_dump();
+#endif
     telemetry_msg("  hold START key 2s to clear");
     break;
   default:
