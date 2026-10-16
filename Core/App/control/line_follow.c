@@ -512,6 +512,10 @@ static uint8_t s_be_flip_done    = 0u;   /* ★R36：本回合是否已翻过（
 static uint8_t s_gsp_anchored = 0u;    /* 1 = 本趟已记下进圈锚 */
 static int32_t s_gsp_base     = 0;     /* 进圈锚（mm，从发车算）*/
 static uint8_t s_gsp_win_mask = 0u;    /* ★R148：本拍哪些切点窗口开着（bit0=①/bit1=②/bit2=③）—— 给 LED 快闪用 */
+#if (GSP_TURN_MASK != 0)
+static uint8_t s_gspt_left = 0u;       /* ★R151：硬转剩余拍数（>0 = 正在硬转）*/
+static uint8_t s_gspt_prev = 0u;       /* ★R151：上一拍的信标命中（做上升沿判定）*/
+#endif
 
 /* 三个切点表的"偏移 / 方向 / 半宽"（提到文件作用域：每拍算窗口掩码也要用）*/
 static const int32_t k_gsp_ctr[3] = { (int32_t)GSP_CUT1_MM, (int32_t)GSP_CUT2_MM, (int32_t)GSP_CUT3_MM };
@@ -745,6 +749,40 @@ void line_follow_control(int16_t base)
            ⇒ 闪 = "窄标记"，专门给肉眼对准真切点用；方向覆盖不受影响。 */
         if (dd <= (int32_t)GSP_BLINK_WIN_MM) { s_gsp_win_mask |= (uint8_t)(1u << wi); }
       }
+    }
+  }
+#endif
+
+#if (GS_PHASE_EN && (GSP_TURN_MASK != 0))
+  /* ★★★ 2026-10-16（1016-R151）【切点直接转向】—— 他："LED闪烁开始的时候已经在切点，这个时候直接给个右转是最佳" ★★★
+     扳机 = **信标（闪）的上升沿**（他已用 BIAS 把信标校准到真切点上）；
+     动作 = **直接给两轮差速硬转**并 early return（谁都抢不走：绕过图案/接管/相位，也绕过丢线找线）。
+     ★位置讲究：必须放在"丢线找线"和"接管/相位"之前 —— 否则切点那一下若瞬间全灭（实测有过
+       `IR=00000000`），会先被 ±18 的原地找线接管，而 18 恰在死区里 ⇒ 卡住。
+     ★转向约定与 R91 出口一致：右转 = 左轮快 / 右轮慢。 */
+  {
+    uint8_t hit = (uint8_t)(s_gsp_win_mask & (uint8_t)GSP_TURN_MASK);
+    if ((hit != 0u) && (s_gspt_prev == 0u))                   /* 上升沿 = 刚到切点 */
+    {
+      s_gspt_left = (uint8_t)(((uint32_t)GSP_TURN_MS + 9u) / 10u);   /* 毫秒 → 拍 */
+      telemetry_msg("GSP-TURN set (beacon -> direct turn)");
+    }
+    s_gspt_prev = hit;
+    if (s_gspt_left > 0u)
+    {
+      int16_t ta = (int16_t)(GSP_TURN_BASE + GSP_TURN_PWM);   /* 左轮 */
+      int16_t tb = (int16_t)(GSP_TURN_BASE - GSP_TURN_PWM);   /* 右轮 */
+#if !(GSP_TURN_RIGHT)
+      { int16_t sw = ta; ta = tb; tb = sw; }                  /* 左转就把左右对调 */
+#endif
+      if (ta >  99) { ta =  99; } if (ta < -99) { ta = -99; }
+      if (tb >  99) { tb =  99; } if (tb < -99) { tb = -99; }
+      motor_set_differential(ta, tb);
+      last_error  = (GSP_TURN_RIGHT) ? 3 : -3;                 /* 给丢线兜底一个"刚转过"的锚 */
+      lost_cycles = 0;
+      line_lost   = 0;
+      s_gspt_left--;
+      return;                                                  /* ★谁都别抢这一拍 */
     }
   }
 #endif
@@ -3748,6 +3786,11 @@ void line_follow_gourd_rearm(void)
   /* ★1016-R145：乙方案（里程定方向）的锚也要每趟复位 —— 否则第二趟一上来就"已在圈里"*/
   s_gsp_anchored = 0u;
   s_gsp_base     = 0;
+  s_gsp_win_mask = 0u;
+#if (GSP_TURN_MASK != 0)
+  s_gspt_left = 0u;      /* ★R151：硬转状态同进同出 */
+  s_gspt_prev = 0u;
+#endif
 #endif
 #if USE_START_BLIND
   /* ★每趟起步的瞬间装载"盲直行"：这里正是 FSM 读完秒、清零里程、进 RUN 的那一处
