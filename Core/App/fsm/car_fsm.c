@@ -294,18 +294,20 @@ void car_fsm_run(uint32_t dt_ms)
 
     line_follow_control(base_speed);
 
-    /* ★★★ 2026-10-16（1016-R148 → R155）【切点窗口 / 出口触发的 LED 指示】—— 他要的（跑车时串口看不到）★★★
-       R148 先做"指定槽的窗口期 ⇒ 三灯快闪"；R154 曾改成"哪个窗口亮哪个灯"；R155 起**两套并存**，见下面总表。 */
-#if ((GSP_LED_MASK != 0) || (GSP_EXIT_LED != 0) || (GSP_BLINK_MASK != 0))
-    /* ★★★ 2026-10-16（1016-R155）【跑车时"看不见串口"的 LED 指示总表】—— 按优先级从高到低 ★★★
+    /* ★★★ 2026-10-16（1016-R148 → R156）【切点窗口 / 速度窗口 / 出口触发的 LED 指示】—— 他要的（跑车时串口看不到）★★★
+       R148 先做"指定槽的窗口期 ⇒ 三灯快闪"；R154 曾改成"哪个窗口亮哪个灯"；R155/R156 起**几套并存**，见下面总表。 */
+#if ((GSP_LED_MASK != 0) || (GSP_EXIT_LED != 0) || (GSP_BLINK_MASK != 0) || (SPD_WIN_BLINK_MASK != 0))
+    /* ★★★ 2026-10-16（1016-R155/R156）【跑车时"看不见串口"的 LED 指示总表】—— 按优先级从高到低 ★★★
        ① 葫芦弯出口**触发** ⇒ **三灯流水灯**（LED1→LED2→LED3 逐个亮，跑 GSP_EXIT_LED_MS 后收工）
-       ② 切点窗口 ⇒ **三灯同时闪烁**（`GSP_BLINK_MASK` 选槽；他要用它判断"窗口准不准"）
+       ② 三灯**同时闪烁** —— 两个来源，任一命中就闪：
+          · 切点窗口（`GSP_BLINK_MASK` 选槽；现在 = 切点3，他要用它判"窗口准不准"）
+          · **速度窗口槽（`SPD_WIN_BLINK_MASK` 选槽 —— R156 加的；现在 = 槽③最后直角弯的减速）**
        ③ 三个切点 ⇒ **哪个窗口开着就点哪个灯**（过葫芦时 1→2→3 依次亮）
        ⚠️ 必须写在 line_follow_control() 之后 —— FSM 每拍写 LED3（运行中常亮）/LED2（丢线闪），
           boost 还会写三灯 ⇒ 只有写在这里才盖得住、才看得见。
        ⚠️ ①② 在"该灭"的那些拍必须**主动写 0**（否则 LED3 的常亮会漏出来 ⇒ 看起来不是"全灭"，
           而是"只灭了一半"，那样就数不清窗口的两头了）。
-       ★改哪个槽闪 / 出口效果多长 → app_config.h 的 GSP_BLINK_MASK / GSP_EXIT_LED_MS。 */
+       ★改哪个槽闪 / 出口效果多长 → app_config.h 的 GSP_BLINK_MASK、SPD_WIN_BLINK_MASK、GSP_EXIT_LED_MS。 */
     {
       uint8_t leds    = 0u;   /* 本拍要写进三灯的值 */
       uint8_t must_wr = 0u;   /* 1 = 本拍必须写（哪怕值是 0 —— 那是"故意灭"）*/
@@ -331,17 +333,28 @@ void car_fsm_run(uint32_t dt_ms)
       }
 #endif
 
-#if (GSP_BLINK_MASK != 0)
-      /* ② 切点窗口的三灯同闪 */
+#if ((GSP_BLINK_MASK != 0) || (SPD_WIN_BLINK_MASK != 0))
+      /* ② 三灯同闪（两个来源：切点窗口 / 速度窗口槽）*/
       if (must_wr == 0u)
       {
-        uint8_t bsrc;
+        uint8_t do_blink = 0u;
+#if (GSP_BLINK_MASK != 0)
+        {
+          uint8_t bsrc;
 #if (GSP_BLINK_SRC_NARROW != 0)
-        bsrc = line_follow_gsp_win_mask();   /* 窄信标（±GSP_BLINK_WIN_MM）—— 用来看"中心对准没有" */
+          bsrc = line_follow_gsp_win_mask();   /* 窄信标（±GSP_BLINK_WIN_MM）—— 用来看"中心对准没有" */
 #else
-        bsrc = line_follow_gsp_dir_mask();   /* 方向窗口（±GSP_WIN3_MM）—— 默认，和"只许一个方向"同一段 */
+          bsrc = line_follow_gsp_dir_mask();   /* 方向窗口（±GSP_WIN3_MM）—— 默认，和"只许一个方向"同一段 */
 #endif
-        if ((bsrc & (uint8_t)GSP_BLINK_MASK) != 0u)
+          if ((bsrc & (uint8_t)GSP_BLINK_MASK) != 0u) { do_blink = 1u; }
+        }
+#endif
+#if (SPD_WIN_BLINK_MASK != 0)
+        /* ★R156：速度窗口槽（他："最后那个直角弯的减速出发时可以同时闪3灯"）——
+           读的是速度块真正在用的那个量 ⇒ 闪的那一段就是"该槽的 FROM→TO 里程区间"。 */
+        if ((line_follow_spd_win_mask() & (uint8_t)SPD_WIN_BLINK_MASK) != 0u) { do_blink = 1u; }
+#endif
+        if (do_blink != 0u)
         {
           uint32_t half = (uint32_t)(GSP_BLINK_MS / 2u);
           if (half == 0u) { half = 25u; }

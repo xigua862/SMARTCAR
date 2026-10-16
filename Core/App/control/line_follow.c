@@ -3626,6 +3626,25 @@ uint8_t line_follow_exit_active(void)
 #endif
 }
 
+/* ★R156：本拍哪些【速度窗口槽】正在生效（bit0=槽①起步 / bit1=槽②第一个直角弯 / bit2=槽③最后的直角弯）
+   —— 给 FSM 做"三灯同闪"指示用（他："最后的那个为了直角转弯而触发的减速，可以给我同时闪3灯"）。
+   ★读的是【锁存后的 s_sw_active】= 速度块真正在用的那个量 ⇒ 灯亮的那一段【就是】减速生效的那一段
+     （从"里程够到 FROM"那一拍起、到"里程够到 TO"那一拍止）。 */
+uint8_t line_follow_spd_win_mask(void)
+{
+#if SPD_WIN_EN
+  uint8_t m = 0u;
+  uint8_t si;
+  for (si = 0u; (si < (uint8_t)SPD_WIN_N) && (si < 8u); si++)
+  {
+    if (s_sw_active[si] != 0u) { m = (uint8_t)(m | (uint8_t)(1u << si)); }
+  }
+  return m;
+#else
+  return 0u;
+#endif
+}
+
 uint8_t line_follow_is_lost(void)
 {
   return line_lost;
