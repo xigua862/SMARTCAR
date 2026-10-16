@@ -497,6 +497,43 @@ static uint8_t s_be_twoblob      = 0u;   /* 本拍是否看到两坨（团数 >=
 static uint8_t s_be_flip_done    = 0u;   /* ★R36：本回合是否已翻过（图案消失才复位）*/
 #endif
 
+#if GS_PHASE_EN
+/* ==========================================================================
+ * ★★★ 2026-10-16（1016-R145）【乙：里程计 + 老葫芦代码结合】—— 他："让里程计和老葫芦弯代码结合，干吧" ★★★
+ *  一句话：**老接管一个字不改**（触发时机/动作/力度全沿用），只把"选哪一侧"改由里程表排定。
+ *  为什么不做甲（R137 那版）：甲只能否决（把相反方向的误差清零 ⇒ 直行），不能主动往该侧咬线；
+ *    而老接管的价值正是主动转向 ⇒ 关掉它之后切点处只剩 PD，力度掉一档（他感觉"更不对"）。
+ *  做法：接管【接受的那一刻】，如果 OD 落在某个切点窗口内 ⇒ 直接用该切点的方向（左/右/左）
+ *    覆盖相位 `s_be_next_l` 给出的"下次用哪侧"。图案那套翻转照旧（不动它，窗口外仍是老行为）。
+ *  ★锚：第一个 OD ≥ GOURD_SPD_FROM_MM(11176) 的拍（每拍维护，见 line_follow_control 里的那一小段）。
+ *  ★窗口：±GSP_WIN_MM（180）；中心 = 实测切点偏移 − GSP_BIAS_MM（手点滞后补偿）。
+ *  ★回退：GS_PHASE_EN 改 0。
+ * ========================================================================== */
+static uint8_t s_gsp_anchored = 0u;    /* 1 = 本趟已记下进圈锚 */
+static int32_t s_gsp_base     = 0;     /* 进圈锚（mm，从发车算）*/
+
+/* 返回 +1 = 选左侧 / -1 = 选右侧 / 0 = 不在任何切点窗口内 */
+static int8_t gsp_dir_for(int32_t od)
+{
+  static const int32_t k_ctr[3] = { (int32_t)GSP_CUT1_MM, (int32_t)GSP_CUT2_MM, (int32_t)GSP_CUT3_MM };
+  static const int8_t  k_dir[3] = { (int8_t)GSP_DIR1, (int8_t)GSP_DIR2, (int8_t)GSP_DIR3 };
+  int32_t best = 0x7FFFFFFF;
+  int8_t  side = 0;
+  uint8_t i;
+
+  if (s_gsp_anchored == 0u) return 0;              /* 还没进圈（锚没记下）*/
+  od -= s_gsp_base;                                /* 相对进圈点 */
+  for (i = 0u; i < 3u; i++)
+  {
+    int32_t d = od - (k_ctr[i] - (int32_t)GSP_BIAS_MM);
+    if (d < 0) d = -d;
+    if (d < best) { best = d; side = k_dir[i]; }    /* 取最近的那个切点 */
+  }
+  if (best > (int32_t)GSP_WIN_MM) return 0;        /* 最近的在窗口外 ⇒ 不管 */
+  return side;
+}
+#endif
+
 void line_follow_control(int16_t base)
 {
 
@@ -670,6 +707,16 @@ void line_follow_control(int16_t base)
         s_sw_spd = s_spdwin[si].spd;                        /* 靠后的槽覆盖前面的 */
       }
     }
+  }
+#endif
+
+#if GS_PHASE_EN
+  /* ★1016-R145【乙：里程定方向】锚的维护 —— 第一个 OD ≥ GOURD_SPD_FROM_MM(11176) 的拍当锚。
+     ★必须每拍都跑（不能等"接管接受"时才记，否则锚会晚一大截 ⇒ 后面所有窗口都偏）。 */
+  if ((s_gsp_anchored == 0u) && (odom_distance_mm() >= (int32_t)GOURD_SPD_FROM_MM))
+  {
+    s_gsp_base     = odom_distance_mm();
+    s_gsp_anchored = 1u;
   }
 #endif
 
@@ -1101,6 +1148,15 @@ void line_follow_control(int16_t base)
         s_be_od     = odom_distance_mm();
         s_be_on     = 1u;
         s_be_side   = s_be_next_l;                        /* 1 = 左, 0 = 右 */
+#if GS_PHASE_EN
+        /* ★1016-R145【乙：里程定方向】—— 窗口内用里程给出的方向覆盖"相位"（老接管其余全照旧）。
+           为什么放在这里：接管接受这一拍才决定"跟哪侧"，把它换掉就是"方向改由里程定" ✓。 */
+        {
+          int8_t gd = gsp_dir_for(odom_distance_mm());
+          if      (gd > 0) { s_be_side = 1u; }            /* 选左侧（bit0 方向）*/
+          else if (gd < 0) { s_be_side = 0u; }            /* 选右侧 */
+        }
+#endif
         /* ★★★ 2026-10-08（1008-R30）【相位翻转改成"边沿触发"——用户方案】★★★
            原来是"每次接受一次触发就翻一次"。问题：同一次切点可能被接受两次
            （图案闪烁、250mm 间距之外又满足一次）⇒ 相位被多翻 ⇒ 后面所有圆选错边。
@@ -3658,6 +3714,11 @@ void line_follow_gourd_rearm(void)
     s_sw_any = 0u;
     s_sw_spd = 0;
   }
+#endif
+#if GS_PHASE_EN
+  /* ★1016-R145：乙方案（里程定方向）的锚也要每趟复位 —— 否则第二趟一上来就"已在圈里"*/
+  s_gsp_anchored = 0u;
+  s_gsp_base     = 0;
 #endif
 #if USE_START_BLIND
   /* ★每趟起步的瞬间装载"盲直行"：这里正是 FSM 读完秒、清零里程、进 RUN 的那一处
