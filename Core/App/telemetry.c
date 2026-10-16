@@ -50,6 +50,28 @@ static uint8_t cmd_has_digit(const char *s)
   return 0u;
 }
 
+/* ★★★ 2026-10-16（1016-R134，他要求）【里程打点工具：`TIK` / `END`】★★★
+   用途：量"切点里程表"（也能量出口/直角弯/终点）——待机手推，每到一个特征点发一次 `TIK`，
+         最后发 `END`：① 把记下的点全部吐出来 ② 【锁车】（与 `XX` 同路径，按住启动键 2s 解除）
+         ③ 【停发周期遥测】（串口安静下来、方便抄数据；收到任何命令即恢复）。
+   每个点记：里程 OD + PATH + 当时的 IR 位图 + IG + GW（后三个白送，便于事后认出"哪条是切点"）。
+   ⚠️ 只在 RAM 里：量完先发 `END` 再断电（与黑匣子同一条纪律）。
+   ★回退：USE_MARK_TOOL 改 0（整条消失）。 */
+#define USE_MARK_TOOL   1
+#define MARK_MAX        40          /* 每条 12 字节 ⇒ 最多 480B RAM */
+typedef struct {
+  int32_t  od;
+  int32_t  path;
+  uint16_t raw;
+  uint8_t  ig;
+  uint8_t  gw;
+} mark_t;
+#if USE_MARK_TOOL
+static mark_t  s_mark[MARK_MAX];
+static uint8_t s_mark_n   = 0u;
+static uint8_t s_tx_quiet = 0u;     /* 1 = 停发周期遥测（END 之后；收到任何命令即恢复）*/
+#endif
+
 /* ============================================================================
  * ★★★ 2026-09-26 晚【串口改成"环形缓冲 + 中断发送" —— 修"经常卡着发不出去"】★★★
  *
@@ -347,6 +369,11 @@ void telemetry_report(void)
   /* ★回放静默期：跳过周期遥测，把串口带宽留给黑匣子回放 */
   if (s_dump_quiet > 0u) { s_dump_quiet--; return; }
 
+#if USE_MARK_TOOL
+  /* ★1016-R134：`END` 之后停发周期遥测（收到任何命令或复位即恢复）*/
+  if (s_tx_quiet != 0u) return;
+#endif
+
   line_reading_t r = line_read();
   char ir[LINE_CHANNELS + 1];
   for (uint8_t i = 0; i < LINE_CHANNELS; i++)
@@ -505,6 +532,11 @@ void telemetry_process_command(void)
   if (!cmd_ready) return;
   cmd_ready = 0;
 
+#if USE_MARK_TOOL
+  /* ★1016-R134：收到任何命令 ⇒ 恢复周期遥测（`END` 自己会在下面再把它置 1）*/
+  s_tx_quiet = 0u;
+#endif
+
   char  c = (char)(cmd_line[0] & 0xDF);   /* 首字母转大写 */
   float v = atof(cmd_line + 1);           /* 兼容 "P 15" 和 "P15" */
 
@@ -535,6 +567,66 @@ void telemetry_process_command(void)
     }
     return;
   }
+
+#if USE_MARK_TOOL
+  /* ★1016-R134【`TIK`】记一个点（必须放在单字母 `T` 之前判，否则会被单电机测试抢走） */
+  if ((c == 'T') && ((cmd_line[1] & 0xDF) == 'I') && ((cmd_line[2] & 0xDF) == 'K'))
+  {
+    char    mkb[128];
+    int     mkn;
+    uint8_t mi;
+    line_reading_t mr = line_read();
+    char    mrs[LINE_CHANNELS + 1];
+    for (mi = 0u; mi < LINE_CHANNELS; mi++) mrs[mi] = (uint8_t)((mr.raw >> mi) & 1u) ? '1' : '0';
+    mrs[LINE_CHANNELS] = '\0';
+    if (s_mark_n >= (uint8_t)MARK_MAX)
+    {
+      mkn = snprintf(mkb, sizeof(mkb), "ERR MARK FULL (%u)\r\n", (unsigned)MARK_MAX);
+    }
+    else
+    {
+      s_mark[s_mark_n].od   = odom_distance_mm();
+      s_mark[s_mark_n].path = odom_path_mm();
+      s_mark[s_mark_n].raw  = (uint16_t)(mr.raw & 0xFFu);
+      s_mark[s_mark_n].ig   = line_follow_in_gourd();
+      s_mark[s_mark_n].gw   = line_follow_gourd_waves();
+      s_mark_n++;
+      mkn = snprintf(mkb, sizeof(mkb), "OK MARK #%u OD=%ldmm PATH=%ldmm IR=%s IG=%u GW=%u\r\n",
+                     (unsigned)s_mark_n,
+                     (long)s_mark[s_mark_n - 1u].od, (long)s_mark[s_mark_n - 1u].path, mrs,
+                     (unsigned)s_mark[s_mark_n - 1u].ig, (unsigned)s_mark[s_mark_n - 1u].gw);
+    }
+    if (mkn > 0) tx_send((const uint8_t*)mkb, (uint16_t)mkn);
+    return;
+  }
+
+  /* ★1016-R134【`END`】吐全部点 + 锁车 + 停发周期遥测（并清空，便于连着量第二遍） */
+  if ((c == 'E') && ((cmd_line[1] & 0xDF) == 'N'))
+  {
+    char    mkb[128];
+    int     mkn;
+    uint8_t mi;
+    s_tx_quiet = 1u;                        /* 先静默：保证这批数据不被周期行插队 */
+    for (mi = 0u; mi < s_mark_n; mi++)
+    {
+      char    irs[LINE_CHANNELS + 1];
+      uint8_t k;
+      for (k = 0u; k < LINE_CHANNELS; k++) irs[k] = (uint8_t)((s_mark[mi].raw >> k) & 1u) ? '1' : '0';
+      irs[LINE_CHANNELS] = '\0';
+      mkn = snprintf(mkb, sizeof(mkb), "MARK#%u OD=%ldmm PATH=%ldmm IR=%s IG=%u GW=%u\r\n",
+                     (unsigned)(mi + 1u), (long)s_mark[mi].od, (long)s_mark[mi].path, irs,
+                     (unsigned)s_mark[mi].ig, (unsigned)s_mark[mi].gw);
+      if (mkn > 0) tx_send((const uint8_t*)mkb, (uint16_t)mkn);
+    }
+    mkn = snprintf(mkb, sizeof(mkb),
+                   "OK MARK END n=%u (LOCKED: hold START 2s; quiet: any cmd resumes)\r\n",
+                   (unsigned)s_mark_n);
+    s_mark_n = 0u;                          /* 清空 ⇒ 可接着量第二遍 */
+    car_fsm_emergency_stop_cause(2u);       /* 锁车（与 XX 同一条路径）*/
+    if (mkn > 0) tx_send((const uint8_t*)mkb, (uint16_t)mkn);
+    return;
+  }
+#endif /* USE_MARK_TOOL */
 
   if (strchr("PSDTMLBRVHXOZQ", c) == NULL) return;
   char buf[112];
