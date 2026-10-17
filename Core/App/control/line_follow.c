@@ -2453,19 +2453,39 @@ void line_follow_control(int16_t base)
   /* ---- 持续丢线: 原地旋转找线（超时停车防跑飞）---- */
   if (line_lost)
   {
-    int16_t spin = last_error >= 0 ? LOST_SPIN_SPEED : -LOST_SPIN_SPEED;
-    reset_control_history();
-    if (lost_cycles > LOST_MAX_CYCLES)
+#if (START_STRAIGHT_EN && (START_STRAIGHT_MM > 0))
+    /* ★★★ 2026-10-17（1016-R168）【起步区：禁止"原地转圈找线"】—— 他："开头就跟斑马线转圈" ★★★
+       机制（就是这一段的锅）：`r.active == 0`（8 路全灭）连续超过 `LOST_SPIN_DELAY` = **2 拍（约 20~30ms）**
+         ⇒ `line_lost = 1` ⇒ 下面 **原地旋转找线** + **`return`**。
+       而起步那几百毫米恰恰最容易全灭：① **翘头**让传感器照不到线；② 过**斑马线**时线被白块吞掉。
+       ⇒ 车在原地打转 = 他看到的"开头就跟斑马线转圈"。
+       ★★而且这个 `return` 在**误差整形链之前** ⇒ 我在起步区加的所有"压直行"（`e = 0`）**一行都执行不到**
+         —— 这就是"改了好几版一点效果都没有"的真正原因（不是参数不对，是**代码根本走不到那里**）。
+       做法：起步区里就算全灭也**不旋转找线** ⇒ 清掉 `line_lost`/`lost_cycles` 让流程继续往下走，
+         后面"起步区 e=0"再把方向压成直行 ⇒ **起步段就是直着走，不管传感器看不看得见**。
+       ★回退：`START_STRAIGHT_EN` 改 0。 */
+    if (odom_distance_mm() < (int32_t)START_STRAIGHT_MM)
     {
-      lost_cycles = (uint16_t)(LOST_MAX_CYCLES + 1);
-      spin = 0;
+      line_lost   = 0;
+      lost_cycles = 0;
     }
-    pwm_out[0] = spin;
-    pwm_out[1] = (int16_t)-spin;
-    line_follow_dbg_set(0, spin, 0, lost_cycles,
-                        (uint8_t)(1u | (line_follow_in_gourd() ? 2u : 0u)));
-    motor_set_differential(spin, (int16_t)-spin);
-    return;
+    else
+#endif
+    {
+      int16_t spin = last_error >= 0 ? LOST_SPIN_SPEED : -LOST_SPIN_SPEED;
+      reset_control_history();
+      if (lost_cycles > LOST_MAX_CYCLES)
+      {
+        lost_cycles = (uint16_t)(LOST_MAX_CYCLES + 1);
+        spin = 0;
+      }
+      pwm_out[0] = spin;
+      pwm_out[1] = (int16_t)-spin;
+      line_follow_dbg_set(0, spin, 0, lost_cycles,
+                          (uint8_t)(1u | (line_follow_in_gourd() ? 2u : 0u)));
+      motor_set_differential(spin, (int16_t)-spin);
+      return;
+    }
   }
 
 #if GOURD_ARC_FLIP
