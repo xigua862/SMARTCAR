@@ -17,7 +17,9 @@ uint8_t line_follow_gourd_waves(void);   /* 葫芦弯已识别的相切点个数
 uint8_t line_follow_gsp_win_mask(void);  /* ★R148：本拍哪些【窄信标】窗口开着（bit0..2）*/
 uint8_t line_follow_gsp_dir_mask(void);  /* ★R154：本拍哪些【方向窗口】开着（bit0..2）—— 流水灯指示用 */
 uint8_t line_follow_exit_active(void);   /* ★R154：出口右转是否正在进行 —— 出口触发的 LED 指示用 */
-uint8_t line_follow_spd_win_mask(void);  /* ★R156：本拍哪些【速度窗口槽】正在生效（bit0..2 = 槽①起步/②第一个直角弯/③最后的直角弯）*/
+uint8_t line_follow_spd_win_mask(void);
+/* ★R179：第一个直角弯之后的"减速比例"(%) —— 串口 `J <10~100>` 调；返回实际生效值（带限幅）*/
+int16_t line_follow_set_postc1_pct(int16_t pct);  /* ★R156：本拍哪些【速度窗口槽】正在生效（bit0..2 = 槽①起步/②第一个直角弯/③最后的直角弯）*/
 uint16_t line_follow_1k_missed(void);    /* ★本窗口 100Hz 漏看了几拍 1kHz 采样(遥测 K1=) */
 /* ★本窗口 1kHz 采样的完整统计（遥测 K1=missed/total 与 MX=maxact/maxraw）。
    ★必须读这个、不要再直接调 line_1k_take —— 那个会清零窗口，

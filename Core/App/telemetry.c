@@ -635,7 +635,7 @@ void telemetry_process_command(void)
   }
 #endif /* USE_MARK_TOOL */
 
-  if (strchr("PSDTMLBRVHXOZQ", c) == NULL) return;
+  if (strchr("PSDTMLBRVHXOZQJ", c) == NULL) return;
   char buf[112];
   int  n = 0;
 
@@ -671,6 +671,20 @@ void telemetry_process_command(void)
         if (sp_curve < 10) sp_curve = 10;
       }
       n = snprintf(buf, sizeof(buf), "OK SP=%d CURVE=%d\r\n", sp_straight, sp_curve);
+    }
+  }
+  else if (c == 'J')                        /* ★R179: 第一个弯之后的减速比例(%) 10~100 */
+  {
+    test_mode = 0;
+    if (!cmd_has_digit(cmd_line + 1))
+    {
+      n = snprintf(buf, sizeof(buf), "ERR J needs a value (10~100)\r\n");
+    }
+    else
+    {
+      int16_t pct = (int16_t)(v + 0.5f);
+      pct = line_follow_set_postc1_pct(pct);
+      n = snprintf(buf, sizeof(buf), "OK POSTC1=%d%% (100=no slow)\r\n", (int)pct);
     }
   }
   else if (c == 'D')

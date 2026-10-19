@@ -237,6 +237,22 @@ static float  tgt_rpm[2] = {0, 0};
    纯观测、不参与控制。用途见 line_follow_last_pwm() 的说明（头文件里）。 */
 static int16_t pwm_out[2] = {0, 0};
 
+#if POSTC1_SLOW_EN
+/* ★R179：第一个直角弯之后的减速比例（%）。串口 `J <10~100>` 可改 ⇒ 他现场调。 */
+static int16_t s_postc1_pct = (int16_t)POSTC1_PCT_DEFAULT;
+#endif
+
+#if POSTC1_SLOW_EN
+/* ★R179：设置"第一个弯之后的减速比例"（%）。返回实际生效的值（10~100，带限幅）。*/
+int16_t line_follow_set_postc1_pct(int16_t pct)
+{
+  if (pct < 10)  { pct = 10; }     /* 安全下限：太小会掉进电机死区（~17~20）*/
+  if (pct > 100) { pct = 100; }    /* 100 = 不减速 */
+  s_postc1_pct = pct;
+  return pct;
+}
+#endif
+
 /* 直接找线/停车后清除旧控制历史，避免重新接管时沿用原圆的偏置。 */
 static void reset_control_history(void)
 {
@@ -1767,6 +1783,29 @@ void line_follow_control(int16_t base)
         sp = tgt;
       }
       led_mask(0x07u);   /* ★R122（用户要求）：每次开启提速 ⇒ 同时点亮 3 个信号 LED ✓ */
+    }
+  }
+#endif
+
+#if POSTC1_SLOW_EN
+  /* ★★★ 2026-10-17（1016-R179）【第一个直角弯之后的"减速 buff"（负重后打滑）】★★★
+     他："现在换了负重，我们经常打滑…第一个直角弯道之后加上减速的buff…比例改成串口函数我来调试"
+     做法：`POSTC1_FROM_MM(1500) ~ POSTC1_TO_MM(16600，占位)` 这一段里，把**最终目标速度 sp** 乘上
+       `s_postc1_pct/100`（串口 `J` 改）。★放在**提速块之后** ⇒ 提速也不能把这段速度顶回去。
+     只乘速度 ⇒ 循迹/判据/转向逻辑一个字不动。
+     回退：`POSTC1_SLOW_EN` 改 0（或串口 `J 100`）。 */
+  {
+    int32_t od_pc = odom_distance_mm();
+    if ((od_pc >= (int32_t)POSTC1_FROM_MM) && (od_pc < (int32_t)POSTC1_TO_MM))
+    {
+      int16_t pct_pc = s_postc1_pct;
+      if (pct_pc < 10)  { pct_pc = 10; }
+      if (pct_pc > 100) { pct_pc = 100; }
+      if (pct_pc < 100)
+      {
+        sp = (int16_t)(((int32_t)sp * (int32_t)pct_pc) / 100);
+        if (sp < 10) { sp = 10; }      /* 防掉进电机死区（~17~20）以下 */
+      }
     }
   }
 #endif
