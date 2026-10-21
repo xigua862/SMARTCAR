@@ -561,16 +561,11 @@ static uint8_t s_gspt_prev = 0u;       /* ★R151：上一拍的信标命中（�
 
 /* 三个切点表的"偏移 / 方向 / 半宽"（提到文件作用域：每拍算窗口掩码也要用）*/
 static const int32_t k_gsp_ctr[3] = { (int32_t)GSP_CUT1_MM, (int32_t)GSP_CUT2_MM, (int32_t)GSP_CUT3_MM };
-#if USE_BRANCH_EDGE   /* ★2026-10-21：k_gsp_dir 只被 gsp_dir_for 用，而它只在接管块里被调用
-                         ⇒ 跟着 USE_BRANCH_EDGE 一起走，否则关接管会报 #177-D 未引用 */
 static const int8_t  k_gsp_dir[3] = { (int8_t)GSP_DIR1, (int8_t)GSP_DIR2, (int8_t)GSP_DIR3 };
-#endif
 static const int32_t k_gsp_win[3] = { (int32_t)GSP_WIN1_MM, (int32_t)GSP_WIN2_MM, (int32_t)GSP_WIN3_MM };
 static const int8_t  k_gsp_ow[3]  = { (int8_t)GSP_OW_DIR1, (int8_t)GSP_OW_DIR2, (int8_t)GSP_OW_DIR3 };  /* ★R152：只许哪一侧 */
 
 /* 返回 +1 = 选左侧 / -1 = 选右侧 / 0 = 不在任何切点窗口内 */
-#if USE_BRANCH_EDGE   /* ★2026-10-21：唯一调用点在接管里（“里程定方向”覆盖相位那一拍）
-                         ⇒ 接管关掉后这段不编译（它不参与“单向阀/三灯闪”，那两个走 s_gsp_*_mask）*/
 static int8_t gsp_dir_for(int32_t od)
 {
   int32_t best = 0x7FFFFFFF;
@@ -589,7 +584,6 @@ static int8_t gsp_dir_for(int32_t od)
   if (best > win) return 0;                        /* 最近的那个也在它的窗口外 ⇒ 不管 */
   return side;
 }
-#endif /* USE_BRANCH_EDGE */
 
 /* ★R148：本拍哪些切点窗口开着（bit0..2）—— 给 FSM 做 LED 快闪指示用（他："第二个切点的窗口期你给 LED 快闪"）*/
 uint8_t line_follow_gsp_win_mask(void)
