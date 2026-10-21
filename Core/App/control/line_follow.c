@@ -613,6 +613,11 @@ static uint8_t s_gsp_anchored = 0u;    /* 1 = 本趟已记下进圈锚 */
 static int32_t s_gsp_base     = 0;     /* 进圈锚（mm，从发车算）*/
 static uint8_t s_gsp_win_mask = 0u;    /* ★R148：本拍哪些"信标窗口"开着（窄，±GSP_BLINK_WIN_MM）—— 给 LED 快闪用 */
 static uint8_t s_gsp_dir_mask = 0u;    /* ★R152：本拍哪些"方向窗口"开着（宽，±k_gsp_win[]）—— 给"只许一个方向"用 */
+#if CUT3_KICK_EN
+/* ★2026-10-21 晚【切点3 窗口末尾强制转向】状态 —— 见下面掩码块的下降沿检测 + 控制函数开头的执行段 */
+static uint8_t s_c3_prev = 0u;         /* 上一拍切点3 方向窗口是否开着（做下降沿）*/
+static uint8_t s_c3_kick = 0u;         /* 强制转向剩余拍数（>0 = 正在转）*/
+#endif
 #if (GSP_TURN_MASK != 0)
 static uint8_t s_gspt_left = 0u;       /* ★R151：硬转剩余拍数（>0 = 正在硬转）*/
 static uint8_t s_gspt_prev = 0u;       /* ★R151：上一拍的信标命中（做上升沿判定）*/
@@ -789,6 +794,33 @@ void line_follow_control(int16_t base)
   line_reading_t r = line_read();
   int8_t e = r.error;
 
+#if CUT3_KICK_EN
+  /* ★★★ 2026-10-21 晚【切点3 窗口末尾：强制左转】★★★
+     他的原话："直接给切点3的最后强制给个左转"。
+     触发 = 上面掩码块检测到的**下降沿**（切点3 方向窗口刚关掉那一拍）；动作 = 直接给两轮差速硬转 CUT3_KICK_MS，
+     然后 early return（谁都抢不走：绕过丢线找线 / 十字宽图案 / 接管 / PD）。
+     ★位置：**出口右转块之后** —— 两个都是"直接写电机 + return"，必须把优先级定死：出口优先（它是路线上的真事件）。
+       ⇒ 所以出口门槛必须放在"这次强制转"走完之后才开（见 app_config.h 里 GOURD_EXIT_FROM_MM 的说明）。
+     ★方向约定与出口一致：右转 = 左轮快 / 右轮慢；`CUT3_KICK_SIDE = 0` ⇒ 左右对调 = 左转。
+     ★回退：`CUT3_KICK_EN` 改 0（整段不编译）。 */
+  if (s_c3_kick > 0u)
+  {
+    int16_t ka = (int16_t)((int16_t)CUT3_KICK_BASE + (int16_t)CUT3_KICK_PWM);
+    int16_t kb = (int16_t)((int16_t)CUT3_KICK_BASE - (int16_t)CUT3_KICK_PWM);
+#if (CUT3_KICK_SIDE == 0)
+    { int16_t ks = ka; ka = kb; kb = ks; }          /* 左转 ⇒ 对调（右轮快 / 左轮慢）*/
+#endif
+    if (ka >  99) { ka =  99; } if (ka < -99) { ka = -99; }
+    if (kb >  99) { kb =  99; } if (kb < -99) { kb = -99; }
+    motor_set_differential(ka, kb);
+    last_error  = (CUT3_KICK_SIDE != 0) ? 3 : -3;   /* 给丢线兜底一个"刚转过"的方向锚 */
+    lost_cycles = 0;
+    line_lost   = 0;
+    s_c3_kick--;
+    return;
+  }
+#endif
+
 #if USE_GOURD_ODOM_ARM
   /* ★★★ 2026-10-08（1008-R21）【里程闸门】用户方案 ★★★
      一句话：起点发车后，里程没到 GOURD_ARM_MM 之前，葫芦圈那套逻辑一律不启用
@@ -908,6 +940,21 @@ void line_follow_control(int16_t base)
         if (dd <= k_gsp_win[wi])             { s_gsp_dir_mask |= (uint8_t)(1u << wi); }   /* 宽 = 方向（管转向，★R152）*/
       }
     }
+#if CUT3_KICK_EN
+    /* ★★★ 2026-10-21 晚【切点3：窗口**末尾**那一拍 ⇒ 触发强制转向】★★★
+       他的原话："直接给切点3的最后强制给个左转"。
+       判据 = 切点3 方向窗口的**下降沿**（上一拍还开着、这一拍关了）。
+       ★放在"每拍算掩码"这里 ⇒ 与 K 平移、窗口参数自动同步（不管窗口怎么挪，都在它末尾那一拍响）。 */
+    {
+      uint8_t c3 = (uint8_t)(s_gsp_dir_mask & 0x04u);
+      if ((c3 == 0u) && (s_c3_prev != 0u))
+      {
+        s_c3_kick = (uint8_t)(((uint32_t)CUT3_KICK_MS + 9u) / 10u);   /* ms → 拍 */
+        telemetry_msg("CUT3-KICK set (window end -> force turn)");
+      }
+      s_c3_prev = c3;
+    }
+#endif
   }
 #endif
 
@@ -4170,6 +4217,11 @@ void line_follow_gourd_rearm(void)
   s_gsp_base     = 0;
   s_gsp_win_mask = 0u;
   s_gsp_dir_mask = 0u;
+#if CUT3_KICK_EN
+  /* ★2026-10-21：切点3 强制转向的"每趟一次性"状态必须一起清（这是 R162 那个教训：漏清 = 一次上电只做一次）*/
+  s_c3_prev = 0u;
+  s_c3_kick = 0u;
+#endif
 #if (GSP_TURN_MASK != 0)
   s_gspt_left = 0u;      /* ★R151：硬转状态同进同出 */
   s_gspt_prev = 0u;
