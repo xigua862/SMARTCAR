@@ -2315,7 +2315,13 @@
    · 力度/时长：`CUT3_KICK_BASE 22`、`CUT3_KICK_PWM 20`、`CUT3_KICK_MS 250`
      ⇒ 差速 = 左 2 / 右 42（左转）；想转狠一点就加 PWM，想短一点就减 MS。
    ★回退：`CUT3_KICK_EN` 改 0。 */
-#define CUT3_KICK_EN    1
+#define CUT3_KICK_EN    0   /* ★2026-10-21 晚（单变量，他："关掉强转，我看看是不是电压的问题"）：**1 → 0 = 关掉强制转向**
+                               · 目的：把"切点3 那记强制左转"这个变量拿掉，单独观察剩下的现象是不是随电压变化。
+                               · 关掉后：`CUT3_KICK_MS/BASE/PWM/SIDE` 全部不参与编译（整段 `#if` 掉）。
+                               ⚠️ **出口门槛仍是 13494**（上一版为了给强制转让路才推到这里的）⇒ 现在没有强制转了，
+                                 出口会比"正确 T 口"晚约 200 OD（≈390mm 真实）。若出口变晚/错过，把它退回 13294
+                                 （`GOURD_EXIT_FROM_MM` 与 `GOURD_SPD_TO_MM` 成对）。
+                               ★回退：改回 1。 */
 #define CUT3_KICK_SIDE  0
 #define CUT3_KICK_MS    250
 #define CUT3_KICK_BASE  22
