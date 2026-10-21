@@ -28,9 +28,66 @@
 #include "usart.h"             /* ★2026-09-26 诊断摘要直接走 huart1（telemetry_msg 不支持格式串） */
 #endif
 
+/* ==========================================================================
+ * ★★★ 2026-10-21 晚【全局里程平移：串口 `K <delta>` 现场整体调】★★★
+ *  他的原话：**"你写个串口调参函数哈，我直接一个函数整体调整葫芦弯道后面所有的里程"**
+ *  ⇒ 一个全局偏移 `s_odom_shift`（mm），**同时**加到"进圈起"的那 11 个阈值上：
+ *     GOURD_ARM / GOURD_SPD_FROM / GOURD_SPD_TO / G7_LEFT_FROM / G7_LEFT_TO /
+ *     GOURD_EXIT_FROM / CORNER2_FROM / CORNER2_TO / EXIT_FINISH / BRANCH_EDGE_WIDE_FROM / BRANCH_EDGE_WIDE_TO
+ *  ★三个切点窗口不需要单独加：它们 = 锚(GOURD_SPD_FROM) + 偏移 − BIAS，锚跟着平移 ⇒ 窗口自动跟着走。
+ *  ★只加偏移，不改任何判据结构/顺序；偏移量有硬限幅（±2000mm），且不会把最小值拖到 ≤0。
+ *  ★跑车中途改也可以，但**建议停车改**（改的那一刻窗口位置会跳）。
+ *  ★回退：`K !` 清零；或把下面 s_odom_shift 初值改 0（本来就是 0）。
+ * ========================================================================== */
+#define ODOM_SHIFT_LIMIT_MM   2000
+static int32_t s_odom_shift = 0;       /* 全局平移量（mm），0 = 用 app_config.h 里的原值 */
+
+int32_t line_follow_odom_shift(void)
+{
+  return s_odom_shift;
+}
+
+/* 在"进圈起"最小值上留余量：平移后 GOURD_ARM 必须 > 0（本来 11050，±2000 也不会破，这里只是保险）*/
+int32_t line_follow_odom_shift_apply(int32_t delta)
+{
+  int32_t ns = s_odom_shift + delta;
+  if (ns >  (int32_t)ODOM_SHIFT_LIMIT_MM) ns =  (int32_t)ODOM_SHIFT_LIMIT_MM;
+  if (ns < -(int32_t)ODOM_SHIFT_LIMIT_MM) ns = -(int32_t)ODOM_SHIFT_LIMIT_MM;
+  if (((int32_t)GOURD_ARM_MM + ns) < 1000) ns = 1000 - (int32_t)GOURD_ARM_MM;  /* 兜底：闸门别变负数 */
+  s_odom_shift = ns;
+  return s_odom_shift;
+}
+
+void line_follow_odom_shift_reset(void)
+{
+  s_odom_shift = 0;
+}
+
+/* 把"当前生效"的 11 个阈值填进 out[]（给串口 `K` 打印用）*/
+uint8_t line_follow_odom_win_dump(int32_t *out, uint8_t n)
+{
+  static const int32_t base[ODOM_WIN_N] = {
+    (int32_t)GOURD_ARM_MM,
+    (int32_t)GOURD_SPD_FROM_MM,
+    (int32_t)GOURD_SPD_TO_MM,
+    (int32_t)G7_LEFT_FROM_MM,
+    (int32_t)G7_LEFT_TO_MM,
+    (int32_t)GOURD_EXIT_FROM_MM,
+    (int32_t)CORNER2_FROM_MM,
+    (int32_t)CORNER2_TO_MM,
+    (int32_t)EXIT_FINISH_MM,
+    (int32_t)BRANCH_EDGE_WIDE_FROM_MM,
+    (int32_t)BRANCH_EDGE_WIDE_TO_MM
+  };
+  uint8_t i;
+  if ((out == 0) || (n == 0u)) { return 0u; }
+  if (n > ODOM_WIN_N) { n = ODOM_WIN_N; }
+  for (i = 0u; i < n; i++) { out[i] = base[i] + s_odom_shift; }
+  return n;
+}
+
 /* 丢线/上次误差状态 */
-static int8_t   last_error  = 0;
-static int8_t   last_e      = 0;   /* 上一次误差(PD 微分用) */
+static int8_t   last_error  = 0;static int8_t   last_e      = 0;   /* 上一次误差(PD 微分用) */
 static uint16_t lost_cycles = 0;   /* ★uint8 会在 256 拍回绕, 把"停车防跑飞"抵消 */
 static uint8_t  line_lost   = 0;
 /* ★★★ 2026-09-26 晚【找回线后的"缓一拍"计数】★★★
@@ -462,12 +519,14 @@ static uint8_t s_sw_idx = 0xFFu;         /* ★R157：当前生效的是【哪�
 
 /* 速度窗口表：{进(mm), 出(mm), 该窗口的速度} —— 顺序即优先级（靠后者覆盖前面的）
    ★R157：加了第 4 槽"终点前降速"（默认关：from/to 都 0 ⇒ 上面 `to <= from` 那句直接跳过它）。*/
-typedef struct { int32_t from_mm; int32_t to_mm; int16_t spd; } spdwin_t;
+typedef struct { int32_t from_mm; int32_t to_mm; int16_t spd; uint8_t dyn; } spdwin_t;
 static const spdwin_t s_spdwin[SPD_WIN_N] = {
-  { LAUNCH_FROM_MM,  LAUNCH_TO_MM,  LAUNCH_SPD  },
-  { CORNER1_FROM_MM, CORNER1_TO_MM, CORNER1_SPD },
-  { CORNER2_FROM_MM, CORNER2_TO_MM, CORNER2_SPD },
-  { FINAL_FROM_MM,   FINAL_TO_MM,   FINAL_SPD   }
+  { LAUNCH_FROM_MM,  LAUNCH_TO_MM,  LAUNCH_SPD,  0u },
+  { CORNER1_FROM_MM, CORNER1_TO_MM, CORNER1_SPD, 0u },
+  /* ★2026-10-21：只有槽③（最后直角弯）跟着串口 `K` 的全局平移走（它在"进圈"之后）。
+     槽①起步 / 槽②第一个直角弯都在进圈之前 ⇒ dyn = 0（不跟）。 */
+  { CORNER2_FROM_MM, CORNER2_TO_MM, CORNER2_SPD, 1u },
+  { FINAL_FROM_MM,   FINAL_TO_MM,   FINAL_SPD,   0u }
 };
 #endif
 #if USE_GOURD_EXIT_ZONE
@@ -619,7 +678,7 @@ void line_follow_control(int16_t base)
       s_fin_fr++;
       if (s_fin_fr >= (uint16_t)((EXIT_FINISH_MS + 9u) / 10u)) { s_fin_state = 2u; }
     }
-    else if ((EXIT_FINISH_MS > 0u) && (EXIT_FINISH_MM > 0) && (odom_distance_mm() >= (int32_t)EXIT_FINISH_MM))   /* ★R110：门槛必须 > 0 ⇒ 写 0 = 关闭 ✓（防误触发）*/
+    else if ((EXIT_FINISH_MS > 0u) && (EXIT_FINISH_MM > 0) && (odom_distance_mm() >= ((int32_t)EXIT_FINISH_MM + s_odom_shift)))   /* ★R110：门槛必须 > 0 ⇒ 写 0 = 关闭 ✓（防误触发）*/
     {
       line_reading_t fnr = line_read();
       uint8_t fn_raw = (uint8_t)(fnr.raw & 0xFFu);
@@ -667,7 +726,7 @@ void line_follow_control(int16_t base)
           s_ex_tmr = (uint16_t)((EXIT_TURN_MS + 9u) / 10u);   /* 走够了 ⇒ 开始右转 ✓ */
         }
       }
-      else if ((EXIT_TURN_MS > 0u) && (odom_distance_mm() >= (int32_t)GOURD_EXIT_FROM_MM))
+      else if ((EXIT_TURN_MS > 0u) && (odom_distance_mm() >= ((int32_t)GOURD_EXIT_FROM_MM + s_odom_shift)))
       {
         line_reading_t exr = line_read();
         uint8_t ex_raw  = (uint8_t)(exr.raw & 0xFFu);
@@ -731,7 +790,7 @@ void line_follow_control(int16_t base)
      为什么它能取代"进圈印记"：里程只增不减、不依赖图案与陀螺、越过了就永远越过
        ⇒ 不存在"错误状态被锁存下来"这种事（那正是 R20 咬人的地方）。
      放在函数最前面：下面的分支口块与出圈块都读它。 */
-  s_gourd_armed = ((odom_distance_mm() >= (int32_t)GOURD_ARM_MM)
+  s_gourd_armed = ((odom_distance_mm() >= ((int32_t)GOURD_ARM_MM + s_odom_shift))
 #if USE_GOURD_EXIT_ZONE
                    && (s_gourd_done == 0u)      /* ★R22：出圈转过之后，整套葫芦圈逻辑一起关掉 */
 #endif
@@ -750,9 +809,9 @@ void line_follow_control(int16_t base)
     {
       if (s_gsw_active == 0u)
       {
-        if (od_now >= (int32_t)GOURD_SPD_FROM_MM) s_gsw_active = 1u;
+        if (od_now >= ((int32_t)GOURD_SPD_FROM_MM + s_odom_shift)) s_gsw_active = 1u;
       }
-      else if (od_now >= (int32_t)GOURD_SPD_TO_MM)
+      else if (od_now >= ((int32_t)GOURD_SPD_TO_MM + s_odom_shift))
       {
         s_gsw_active = 0u;
         s_gsw_done   = 1u;
@@ -780,6 +839,8 @@ void line_follow_control(int16_t base)
     {
       int32_t from = s_spdwin[si].from_mm;
       int32_t to   = s_spdwin[si].to_mm;
+      /* ★2026-10-21：槽③ 跟着 `K` 的全局平移走（其余槽在进圈之前，不跟）*/
+      if (s_spdwin[si].dyn != 0u) { from += s_odom_shift; to += s_odom_shift; }
       if ((from < 0) || (to <= from)) continue;            /* 该槽未启用 */
       if (s_sw_done[si] != 0u) continue;                   /* 本趟已过 */
       if (s_sw_active[si] == 0u)
@@ -820,7 +881,7 @@ void line_follow_control(int16_t base)
      ★R148：顺便算出"本拍哪些切点窗口开着"（bit0..2）—— 给 FSM 的 LED 快闪指示用。 */
   {
     int32_t gwin_od = odom_distance_mm();
-    if ((s_gsp_anchored == 0u) && (gwin_od >= (int32_t)GOURD_SPD_FROM_MM))
+    if ((s_gsp_anchored == 0u) && (gwin_od >= ((int32_t)GOURD_SPD_FROM_MM + s_odom_shift)))
     {
       s_gsp_base     = gwin_od;
       s_gsp_anchored = 1u;
@@ -1273,8 +1334,8 @@ void line_follow_control(int16_t base)
       {
         int32_t odw = odom_distance_mm();
         wide_ok = (uint8_t)(((cnt == 7u) &&
-                             (odw >= (int32_t)BRANCH_EDGE_WIDE_FROM_MM) &&
-                             (odw <= (int32_t)BRANCH_EDGE_WIDE_TO_MM) &&
+                             (odw >= ((int32_t)BRANCH_EDGE_WIDE_FROM_MM + s_odom_shift)) &&
+                             (odw <= ((int32_t)BRANCH_EDGE_WIDE_TO_MM + s_odom_shift)) &&
                              (((L == 0u) && (R == 6u)) || ((L == 1u) && (R == 7u)))) ? 1u : 0u);
       }
       if ((gate != 0u) && ((cnt <= (uint8_t)CROSS_ACTIVE_MAX) || (wide_ok != 0u)) &&
@@ -2746,7 +2807,7 @@ void line_follow_control(int16_t base)
   if (s_gourd_armed != 0u)
   {
     int32_t g7od = odom_distance_mm();
-    if ((g7od >= (int32_t)G7_LEFT_FROM_MM) && (g7od <= (int32_t)G7_LEFT_TO_MM))
+    if ((g7od >= ((int32_t)G7_LEFT_FROM_MM + s_odom_shift)) && (g7od <= ((int32_t)G7_LEFT_TO_MM + s_odom_shift)))
     {
       e = (int8_t)((int16_t)e - (int16_t)G7_LEFT_BIAS);
     }
@@ -3244,9 +3305,9 @@ void line_follow_control(int16_t base)
      出口转向成功（`s_ex_done=1`）或**走出这一段**都立刻恢复 ⇒ 不可能再泄漏到后半段。
      ★回退：EXIT_SLOW_PCT 改 0（整条功能关）。 */
   if ((EXIT_SLOW_PCT > 0u) && (EXIT_SLOW_PCT < 100u) && (s_ex_done == 0u) &&
-      (odom_distance_mm() >= (int32_t)GOURD_EXIT_FROM_MM)
+      (odom_distance_mm() >= ((int32_t)GOURD_EXIT_FROM_MM + s_odom_shift))
 #if EXIT_SLOW_WIN_EN
-      && (odom_distance_mm() < (int32_t)(GOURD_EXIT_FROM_MM + GOURD_EXIT_SLOW_MM))
+      && (odom_distance_mm() < ((int32_t)(GOURD_EXIT_FROM_MM + GOURD_EXIT_SLOW_MM) + s_odom_shift))
 #endif
       )
   {
@@ -3263,9 +3324,9 @@ void line_follow_control(int16_t base)
   {
     int32_t od_lg = odom_distance_mm();
     uint8_t cap_lg = (uint8_t)(((EXIT_SLOW_PCT > 0u) && (EXIT_SLOW_PCT < 100u) && (s_ex_done == 0u) &&
-                                (od_lg >= (int32_t)GOURD_EXIT_FROM_MM)
+                                (od_lg >= ((int32_t)GOURD_EXIT_FROM_MM + s_odom_shift))
 #if EXIT_SLOW_WIN_EN
-                                && (od_lg < (int32_t)(GOURD_EXIT_FROM_MM + GOURD_EXIT_SLOW_MM))
+                                && (od_lg < ((int32_t)(GOURD_EXIT_FROM_MM + GOURD_EXIT_SLOW_MM) + s_odom_shift))
 #endif
                                 ) ? 1u : 0u);
     int16_t dsp = (int16_t)(sp - s_spl_sp);

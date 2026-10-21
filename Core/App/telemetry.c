@@ -687,6 +687,46 @@ void telemetry_process_command(void)
       n = snprintf(buf, sizeof(buf), "OK POSTC1=%d%% (100=no slow)\r\n", (int)pct);
     }
   }
+  else if (c == 'K')                        /* ★2026-10-21：全局里程平移 —— 把"进圈起"的 11 个阈值一起加 delta */
+  {
+    /* 他的原话："你写个串口调参函数哈，我直接一个函数整体调整葫芦弯道后面所有的里程"
+       用法：`K 100` 再加 100（累加）；`K -50` 往回；`K` 只查询；`K !` 清零（回到 app_config.h 原值）。
+       生效范围：GOURD_ARM / GOURD_SPD_FROM / GOURD_SPD_TO / G7_LEFT_FROM / G7_LEFT_TO /
+                 GOURD_EXIT_FROM / CORNER2_FROM / CORNER2_TO / EXIT_FINISH /
+                 BRANCH_EDGE_WIDE_FROM / BRANCH_EDGE_WIDE_TO
+       三个切点窗口不用单独加：它们是"锚 + 偏移 − BIAS"，锚跟着平移 ⇒ 窗口自动跟随。
+       限幅 ±2000mm。★建议停车时发（改的那一拍窗口位置会跳）。 */
+    int32_t w[ODOM_WIN_N];
+    int32_t sh;
+    test_mode = 0;
+
+    if ((cmd_line[1] == '!') || (cmd_line[1] == '='))
+    {
+      line_follow_odom_shift_reset();
+      sh = line_follow_odom_shift();
+      n = snprintf(buf, sizeof(buf), "OK ODSHIFT=%ld (reset)\r\n", (long)sh);
+    }
+    else if (cmd_has_digit(cmd_line + 1))
+    {
+      int32_t d = (int32_t)((v >= 0.0f) ? (v + 0.5f) : (v - 0.5f));
+      sh = line_follow_odom_shift_apply(d);
+      n = snprintf(buf, sizeof(buf), "OK ODSHIFT=%ld\r\n", (long)sh);
+    }
+    else
+    {
+      sh = line_follow_odom_shift();
+      n = snprintf(buf, sizeof(buf), "ODSHIFT=%ld (K <d> add / K ! reset)\r\n", (long)sh);
+    }
+    if (n > 0) { tx_send((const uint8_t*)buf, (uint16_t)n); n = 0; }
+
+    /* 再把"当前生效"的 11 个数分成两短行打出来（这串口的行长有限，别超 ~60）*/
+    (void)line_follow_odom_win_dump(w, (uint8_t)ODOM_WIN_N);
+    n = snprintf(buf, sizeof(buf), "W1 ARM=%ld SPD=%ld/%ld G7=%ld/%ld\r\n",
+                 (long)w[0], (long)w[1], (long)w[2], (long)w[3], (long)w[4]);
+    if (n > 0) { tx_send((const uint8_t*)buf, (uint16_t)n); }
+    n = snprintf(buf, sizeof(buf), "W2 EX=%ld C2=%ld/%ld FIN=%ld WD=%ld/%ld\r\n",
+                 (long)w[5], (long)w[6], (long)w[7], (long)w[8], (long)w[9], (long)w[10]);
+  }
   else if (c == 'D')
   {
     /* ★1016-R132：必须带数值（原来 atof("")=0 ⇒ 孤零零的 D 会把 KD 清零）*/
@@ -822,7 +862,7 @@ void telemetry_process_command(void)
          三字节中文被错配成非法双字节序列。
          而且就算编过去，UTF-8 中文发到 GBK 串口终端上也是乱码。
          ★以后往【字符串字面量】里加内容一律用英文；注释里中文没问题。 */
-      "CMD: P<KP> / S<SPD> / D<KD> / T<1|2> <spd> / M<L> <R> / L<0~7> / B[ms] / R(start) / V(version) / H(diag) / O(read odom) / Z(reset odom) / XX(emergency stop)\r\n");
+      "CMD: P<KP> / S<SPD> / D<KD> / T<1|2> <spd> / M<L> <R> / L<0~7> / B[ms] / R(start) / V(version) / H(diag) / O(read odom) / Z(reset odom) / J<pct> / K<delta>(odom shift) / XX(emergency stop)\r\n");
   }
   if (n > 0) tx_send((const uint8_t*)buf, (uint16_t)n);
 }

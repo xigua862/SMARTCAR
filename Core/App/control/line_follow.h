@@ -144,4 +144,17 @@ void line_follow_test_handturn(void);
      WHEEL_GAIN_L=1.11 生效后，两轮里程差应【明显缩小】（目标 <5%）。
    由 app.c 在 TEST_SPEEDLOOP_MODE=5 时每 10ms 调用一次。 */
 void line_follow_test_asym_cl(int16_t pwm, int16_t max_pwm);
+/* ★★★ 2026-10-21 晚【全局里程平移 · 串口 `K`】★★★
+   他的原话："你写个串口调参函数哈，我直接一个函数整体调整葫芦弯道后面所有的里程"
+   一个偏移量同时加到"进圈起"的 11 个阈值上（三个切点窗口随锚自动跟随，不需要单独加）：
+     GOURD_ARM / GOURD_SPD_FROM / GOURD_SPD_TO / G7_LEFT_FROM / G7_LEFT_TO /
+     GOURD_EXIT_FROM / CORNER2_FROM / CORNER2_TO / EXIT_FINISH /
+     BRANCH_EDGE_WIDE_FROM / BRANCH_EDGE_WIDE_TO
+   限幅 ±2000mm；`K !` 清零。只加偏移，不动任何判据结构。 */
+#define ODOM_WIN_N 11
+int32_t line_follow_odom_shift(void);
+int32_t line_follow_odom_shift_apply(int32_t delta);
+void    line_follow_odom_shift_reset(void);
+uint8_t line_follow_odom_win_dump(int32_t *out, uint8_t n);
+
 #endif /* LINE_FOLLOW_H */
