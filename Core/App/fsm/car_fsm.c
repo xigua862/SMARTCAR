@@ -296,7 +296,7 @@ void car_fsm_run(uint32_t dt_ms)
 
     /* ★★★ 2026-10-16（1016-R148 → R156）【切点窗口 / 速度窗口 / 出口触发的 LED 指示】—— 他要的（跑车时串口看不到）★★★
        R148 先做"指定槽的窗口期 ⇒ 三灯快闪"；R154 曾改成"哪个窗口亮哪个灯"；R155/R156 起**几套并存**，见下面总表。 */
-#if ((GSP_LED_MASK != 0) || (GSP_EXIT_LED != 0) || (GSP_BLINK_MASK != 0) || (SPD_WIN_BLINK_MASK != 0))
+#if ((GSP_LED_MASK != 0) || (GSP_EXIT_LED != 0) || (GSP_BLINK_MASK != 0) || (SPD_WIN_BLINK_MASK != 0) || (GSP_STEADY_MASK != 0))
     /* ★★★ 2026-10-16（1016-R155/R156）【跑车时"看不见串口"的 LED 指示总表】—— 按优先级从高到低 ★★★
        ① 葫芦弯出口**触发** ⇒ **三灯闪烁**（★R162 改成"三灯同闪"；`GSP_EXIT_LED_MODE 1` 可换回 R155 的流水灯）
        ② 三灯**同时闪烁** —— 两个来源，任一命中就闪：
@@ -369,6 +369,21 @@ void car_fsm_run(uint32_t dt_ms)
           uint32_t half = (uint32_t)(GSP_BLINK_MS / 2u);
           if (half == 0u) { half = 25u; }
           leds    = ((now / half) & 1u) ? 0x00u : 0x07u;   /* 三灯**一起**：亮半周期 / 灭半周期 */
+          must_wr = 1u;
+        }
+      }
+#endif
+
+#if (GSP_STEADY_MASK != 0)
+      /* ★★ 2026-10-21 晚【切点窗口 ⇒ 三灯常亮】—— 他："现在第三个切点给个常亮LED，我看看"
+         为什么要单独一条：跑车时 LED3 本来就被 FSM 常亮着（运行中指示）⇒ `GSP_LED_MASK` 给切点3 点亮 LED3
+         **看不出变化**。这一条把选中槽的**整个方向窗口段**变成"三灯常亮"，与"只有 LED3 亮"、"闪"都能区分。
+         优先级：出口闪 > 三灯闪 > 本功能 > 哪个窗口点哪个灯。回退：`GSP_STEADY_MASK` 改 0。 */
+      if (must_wr == 0u)
+      {
+        if ((line_follow_gsp_dir_mask() & (uint8_t)GSP_STEADY_MASK) != 0u)
+        {
+          leds    = (uint8_t)GSP_STEADY_LEDS;   /* 常亮：不跟随 now 翻转 */
           must_wr = 1u;
         }
       }
