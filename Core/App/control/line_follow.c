@@ -87,6 +87,10 @@ uint8_t line_follow_odom_win_dump(int32_t *out, uint8_t n)
 }
 
 /* 丢线/上次误差状态 */
+#if USE_ERR_HPF
+static float    s_hpf_y = 0.0f;    /* 高通滤波器的状态（输出）*/
+static float    s_hpf_e = 0.0f;    /* 上一拍的误差（高通输入）*/
+#endif
 static int8_t   last_error  = 0;static int8_t   last_e      = 0;   /* 上一次误差(PD 微分用) */
 static uint16_t lost_cycles = 0;   /* ★uint8 会在 256 拍回绕, 把"停车防跑飞"抵消 */
 static uint8_t  line_lost   = 0;
@@ -134,7 +138,7 @@ static uint8_t  s_igc_side     = 1u;      /* 咬哪侧：1 = 左，0 = 右 */
 static uint8_t  s_igc_just     = 0u;      /* 刚进入咬边（对齐 last_e）*/
 static uint8_t  s_igc_dbg_fr   = 0u;      /* TRG 诊断打印的限流计数 */
 static uint8_t  s_igc_hits     = 0u;      /* 1 = 已经有过"第一次触发"，在等窗口内的第二次 */
-static uint8_t  s_igc_hit_age  = 0u;      /* 距第一次触发过了多少拍（拍数 > 10 就作废）*/
+static uint16_t s_igc_hit_age  = 0u;      /* 距第一次触发过了多少拍（5ms 一拍；超过窗口就作废）*/
 static uint8_t  s_igc_flash_fr = 0u;      /* 闪灯剩余拍数（10ms 一拍；由控制拍递减）*/
 #endif
 
@@ -721,7 +725,7 @@ void line_follow_control(int16_t base)
     {
       /* 前进阶段：不 return ⇒ 完全交给正常巡线 ✓ */
       s_fin_fr++;
-      if (s_fin_fr >= (uint16_t)((EXIT_FINISH_MS + 9u) / 10u)) { s_fin_state = 2u; }
+      if (s_fin_fr >= (uint16_t)((EXIT_FINISH_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS)) { s_fin_state = 2u; }
     }
     else if ((EXIT_FINISH_MS > 0u) && (EXIT_FINISH_MM > 0) && (odom_distance_mm() >= ((int32_t)EXIT_FINISH_MM + s_odom_shift)))   /* ★R110：门槛必须 > 0 ⇒ 写 0 = 关闭 ✓（防误触发）*/
     {
@@ -768,7 +772,7 @@ void line_follow_control(int16_t base)
       {
         if ((odom_distance_mm() - s_ex_adv) >= (int32_t)EXIT_ADVANCE_MM)
         {
-          s_ex_tmr = (uint16_t)((EXIT_TURN_MS + 9u) / 10u);   /* 走够了 ⇒ 开始右转 ✓ */
+          s_ex_tmr = (uint16_t)((EXIT_TURN_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS);   /* 走够了 ⇒ 开始右转 ✓ */
         }
       }
       else if ((EXIT_TURN_MS > 0u) && (odom_distance_mm() >= ((int32_t)GOURD_EXIT_FROM_MM + s_odom_shift)))
@@ -878,7 +882,7 @@ void line_follow_control(int16_t base)
     if (s_igc_on != 0u)
     {
       uint8_t det = (uint8_t)((igc_lit >= (uint8_t)IGC_LIT_MIN) ? 1u : 0u);
-      uint8_t win = (uint8_t)(((uint32_t)IGC_CONFIRM_MS + 9u) / 10u);   /* 100ms = 10 拍 */
+      uint16_t win = (uint16_t)(((uint32_t)IGC_CONFIRM_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS);   /* 100ms = 10 拍 */
 
       /* 第一次触发的"保质期"到了就作废 */
       if (s_igc_hits != 0u)
@@ -891,7 +895,7 @@ void line_follow_control(int16_t base)
       {
         /* ★2026-10-22 晚【诊断】他："还是没办法触发" ⇒ 每次原始触发都打一行 TRG，
            用来区分"根本没有一片白"vs"有一片白但两次配不上"。限流 50ms，避免阈值抖动刷屏。 */
-        if ((s_igc_dbg_fr == 0u) || ((s_igc_dbg_fr % 5u) == 0u))
+        if ((s_igc_dbg_fr == 0u) || ((s_igc_dbg_fr % (uint8_t)(50u / (uint32_t)CTRL_PERIOD_MS)) == 0u))
         {
           char trg[40];
           (void)snprintf(trg, sizeof(trg), "TRG lit=%u OD=%ld\r\n", (unsigned)igc_lit, (long)igc_od);
@@ -907,11 +911,11 @@ void line_follow_control(int16_t base)
           {
             if (s_igc_cnt < 200u) { s_igc_cnt++; }
             s_igc_last_od  = igc_od;
-            s_igc_flash_fr = (uint8_t)(((uint32_t)IGC_FLASH_MS + 9u) / 10u);
+            s_igc_flash_fr = (uint8_t)(((uint32_t)IGC_FLASH_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS);
             /* ★新映射（他 2026-10-22 改）：1=左、2=右、3=左 */
-            if (s_igc_cnt == 1u)      { s_igc_side = 1u; s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + 9u) / 10u); s_igc_just = 1u; }
-            else if (s_igc_cnt == 2u) { s_igc_side = 0u; s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + 9u) / 10u); s_igc_just = 1u; }
-            else if (s_igc_cnt == 3u) { s_igc_side = 1u; s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + 9u) / 10u); s_igc_just = 1u; }
+            if (s_igc_cnt == 1u)      { s_igc_side = 1u; s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS); s_igc_just = 1u; }
+            else if (s_igc_cnt == 2u) { s_igc_side = 0u; s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS); s_igc_just = 1u; }
+            else if (s_igc_cnt == 3u) { s_igc_side = 1u; s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS); s_igc_just = 1u; }
             (void)snprintf(igb, sizeof(igb), "IG=%u lit=%u OD=%ld\r\n",
                            (unsigned)s_igc_cnt, (unsigned)igc_lit, (long)igc_od);
             telemetry_msg(igb);
@@ -1086,7 +1090,7 @@ void line_follow_control(int16_t base)
       uint8_t c3 = (uint8_t)(s_gsp_dir_mask & 0x04u);
       if ((c3 == 0u) && (s_c3_prev != 0u))
       {
-        s_c3_kick = (uint8_t)(((uint32_t)CUT3_KICK_MS + 9u) / 10u);   /* ms → 拍 */
+        s_c3_kick = (uint8_t)(((uint32_t)CUT3_KICK_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS);   /* ms → 拍 */
         telemetry_msg("CUT3-KICK set (window end -> force turn)");
       }
       s_c3_prev = c3;
@@ -1106,7 +1110,7 @@ void line_follow_control(int16_t base)
     uint8_t hit = (uint8_t)(s_gsp_win_mask & (uint8_t)GSP_TURN_MASK);
     if ((hit != 0u) && (s_gspt_prev == 0u))                   /* 上升沿 = 刚到切点 */
     {
-      s_gspt_left = (uint8_t)(((uint32_t)GSP_TURN_MS + 9u) / 10u);   /* 毫秒 → 拍 */
+      s_gspt_left = (uint8_t)(((uint32_t)GSP_TURN_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS);   /* 毫秒 → 拍 */
       telemetry_msg("GSP-TURN set (beacon -> direct turn)");
     }
     s_gspt_prev = hit;
@@ -3066,6 +3070,30 @@ void line_follow_control(int16_t base)
 #endif
   }
 #endif
+#if USE_ERR_HPF
+  /* ★★★ 2026-10-22 晚【误差高通滤波】—— 他："加上高通滤波试试"
+     一阶高通 hp_k = α·(hp_{k−1} + e_k − e_{k−1})；把它的 ERR_HPF_PCT% 叠回误差后再进 PD。
+     作用：滤掉误差里的"慢漂移"（车会一直偏着跑的那些），只保留"正在快速变化"的部分
+           ⇒ 弯道入口/切点处反应更快；直道不会把偏移越积越多。
+     ★位置：所有误差整形（接管/单向阀/G7/宽图案）之后、PD 之前 ⇒ 它是本拍误差的最终形状。
+     ★回退：ERR_HPF_PCT 改 0（下面整段不生效，行为与之前完全一致）。 */
+  {
+    float hp = ERR_HPF_ALPHA * (s_hpf_y + (float)e - s_hpf_e);
+    int16_t hpa;
+    s_hpf_y = hp;
+    s_hpf_e = (float)e;
+    hpa = (int16_t)(hp * ((float)ERR_HPF_PCT / 100.0f));
+    if (hpa >  40) { hpa =  40; }
+    if (hpa < -40) { hpa = -40; }
+    if (hpa != 0)
+    {
+      int16_t en = (int16_t)((int16_t)e + hpa);
+      if (en >  40) { en =  40; }
+      if (en < -40) { en = -40; }
+      e = (int8_t)en;
+    }
+  }
+#endif
   int16_t d_term = (int16_t)(e - last_e);
   /* ★★★ 2026-10-08（1008-R31）【葫芦圈内降低 KP】—— 用户要求 ★★★
      现象：圈上左右晃幅度太大，影响过切点（晃大了图案就更不容易满足"两坨"判据）。
@@ -4379,6 +4407,10 @@ void line_follow_gourd_rearm(void)
   s_igc_on       = 0u;
   s_igc_cnt      = 0u;
   s_igc_dbg_fr   = 0u;
+#if USE_ERR_HPF
+  s_hpf_y = 0.0f;      /* 每趟起步清高通状态（否则上一趟残余会踢一下）*/
+  s_hpf_e = 0.0f;
+#endif
   s_igc_wide     = 0u;
   s_igc_hold     = 0u;
   s_igc_just     = 0u;
