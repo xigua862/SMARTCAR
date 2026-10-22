@@ -2359,15 +2359,17 @@
    ★回退：`BLIND_EN` 改 0。
    ⚠️ 角度是"相对进入窗口那一刻的车头方向"，不是绝对朝向 ⇒ 与"从哪儿发车"无关。 */
 #define BLIND_EN         1
-#define CUT1_DEG        ( 10.0f)   /* 切点1：**微微左斜 10°**（他："我要的是微微斜，给个 10 上下差不多了"）*/
+#define CUT1_DEG        ( 10.0f)   /* 切点1：微微左斜 10° */
 #define CUT2_DEG        (-10.0f)   /* 切点2：微微右斜 10° */
 #define CUT3_DEG        ( 10.0f)   /* 切点3：微微左斜 10° */
-#define BLIND_KP         ( 2.0f)   /* PWM / 度（10° 的小目标，2.0 起步不会一上来拉满）*/
-#define BLIND_DIFF_MAX     30      /* 差速上限（PWM）—— 真正生效的还会被 BLIND_MIN_PWM 再压一次 */
-#define BLIND_TOL_DEG     ( 1.0f)  /* 到位容差（度）—— 10° 的小角度，容差也得小 */
-#define BLIND_BASE_PWM     26      /* 盲走基速（PWM）；转弯半径主要看它和差速的比值 */
-#define BLIND_MIN_PWM      12      /* ★内侧轮**最低正转 PWM**：低于它内轮就反转 = "原地转"（他上一版就是这么转的）
-                                      ⇒ 实际生效的差速上限 = BLIND_BASE_PWM − BLIND_MIN_PWM = **14** */
+#define BLIND_KP         ( 0.6f)   /* PWM / 度：0.6×10° = 6 ⇒ 刚好用到差速上限，之后随误差收窄 */
+#define BLIND_DIFF_MAX      6      /* ★★ 差速上限（PWM 百分点）—— **这就是"轻微差速"的总旋钮**：
+                                      他："我只希望两个轮轻微差速就好" ⇒ 现在最极端也只有 ≈30±6 = 24/36（比值 1.5）
+                                      ★想更轻 ⇒ 4；想更明显 ⇒ 8~10。转多少度由 CUT*_DEG 管，**别用这个去改角度**。*/
+#define BLIND_TOL_DEG     ( 1.0f)  /* 到位容差（度）*/
+#define BLIND_BASE_PWM     30      /* 盲走基速（两轮平均 PWM）*/
+#define BLIND_MIN_PWM      12      /* 内侧轮最低正转 PWM（安全垫：防止内轮反转 = 原地转）*/
+                                   /*   现在 DIFF_MAX(6) < BASE−MIN(18) ⇒ 这条垫子平时不生效，纯保险 */
 #define BLIND_MAX_MS       1500    /* 单个窗口盲走最长时长（兜底）*/
 /* ★★★ 2026-10-16（1016-R155）【葫芦弯出口代码触发 ⇒ 三灯流水灯】—— 他："葫芦弯出口代码触发时给那 3 个 LED 流水灯效果" ★★★
    触发 = 出口右转那一下（`line_follow_exit_active()`：里程 ≥ GOURD_EXIT_FROM_MM(12844) 读到异常图案 ⇒ 右转 EXIT_TURN_MS(250ms)）。
