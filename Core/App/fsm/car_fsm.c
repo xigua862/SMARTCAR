@@ -97,7 +97,9 @@ static void enter(car_state_t s)
         break;
       }
     led_all(0);
-    led_set(LED_ID_3, 1);          /* 运行中: 第 3 灯常亮 */
+#if RUN_LED3_ON
+    led_set(LED_ID_3, 1);          /* 运行中: 第 3 灯常亮（★2026-10-22 起默认关：他嫌常亮看不见别的）*/
+#endif
     print_odom("START");           /* ★计程起点: 理论上应为 0 */
     break;
   case CAR_STOPPED:

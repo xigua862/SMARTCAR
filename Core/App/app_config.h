@@ -1877,8 +1877,8 @@
                                          · 现在：36/24 一直吃到 13094 ⇒ 与 50% 减速无缝交接，速度单调下降，不再"先冲一下"。
                                          · 窗口长度 11276→13094 = 1818mm（原来 1668）。
                                          ★回退：改回 12944。出窗口（mm）★他实测出口点后替换；必须 > FROM */
-#define GOURD_SPD_STRAIGHT   20       /* 窗口内"直道档"（= 交付版静态 SPEED_STRAIGHT）*/
-#define GOURD_SPD_CURVE      14       /* 窗口内"弯道档"（= 交付版静态 SPEED_CURVE，严格 24）*/
+#define GOURD_SPD_STRAIGHT   16       /* 窗口内"直道档"（= 交付版静态 SPEED_STRAIGHT）*/
+#define GOURD_SPD_CURVE      12       /* 窗口内"弯道档"（= 交付版静态 SPEED_CURVE，严格 24）*/
 #define GOURD_SPD_FORCE_IG   1        /* ★1016-R131（他定的方案）：窗口内【用里程把 IG 挂上】——
                                          他原话："我们的里程计应该替代 IG，但不是重写逻辑，应该在里程
                                          ≥11176 的时候就让 IG 挂上，然后出圈让 IG 正常（照着之前的逻辑）挂 0"。
@@ -2205,11 +2205,13 @@
 #define BRANCH_EDGE_AUTO     0        /* 0 = 关掉老代码的"图案自动接管"（IGC 方案自己决定何时咬边）*/
 #define IGC_EN               1
 #define IGC_ENTRY_MM         11176    /* 进圈里程（比原来的锚 11276 往前推 100）—— 也用作"全程降速"的起点 */
-#define IGC_LIT_MIN          5        /* ★2026-10-22 他："改成 5 个红外传感器被触发才 IG+1"
+#define IGC_LIT_MIN          6        /* ★2026-10-22 他："改成 5 个红外传感器被触发才 IG+1"
                                           ⇒ 亮路数 **≥5** 才算一次"图案触发"（数值本来就是 5，等同"大于 4"）；
                                              想更严 ⇒ 改 6。*/
-#define IGC_CONFIRM_FR       2        /* ★"才"的严格性：必须**连续这么多拍**都 ≥ IGC_LIT_MIN 才算数
-                                         （单拍毛刺不算）⇒ 计数更少、更可信。想更松 ⇒ 改 1。*/
+#define IGC_CONFIRM_MS       100      /* ★2026-10-22 他的新判据："100ms 内连续两次触发（亮>5）才 IG++"
+                                         ⇒ 需要**两次上升沿**，且两次间隔 ≤ 本值（10ms 一拍 ⇒ 10 拍内）。*/
+#define IGC_TWO_EDGES        1        /* 1 = 按上面的"两次上升沿"判（他的原话）；
+                                         0 = 退回"连续 2 拍都满足"（更松，若发现数不够就用 0）。*/
 #define IGC_LIT_CLEAR        3        /* 亮路数 ≤ 这个值才算"退出一片白"，之后才允许下一次计数（迟滞）*/
 #define IGC_MIN_MM           150      /* 两次计数之间至少隔这么多里程（防一片白里连数多次）*/
 #define IGC_HOLD_MS          250      /* 每次"咬住某侧"持续多久 */
@@ -2830,6 +2832,11 @@ typedef struct {
  * -------------------------------------------------------------------------*/
 #define LED_ON_LEVEL         GPIO_PIN_SET      /* 高电平点亮 */
 #define LED_OFF_LEVEL        GPIO_PIN_RESET
+/* ★2026-10-22 晚【跑车时 LED3 是否常亮】—— 他："这破灯一直常亮我看啥？？"
+   就是这里：进入 CAR_RUN 时 `led_set(LED_ID_3,1)` 把第三灯钉亮；之后除了"事件拍"没人再写它 ⇒ 一直亮着。
+   ⇒ **0 = 跑车时三灯全灭**，只有事件才亮（IG 闪一下 / 出口闪 / 丢线 LED2 闪）。
+   ★回退：改 1。 */
+#define RUN_LED3_ON          0
 
 #define BUZZER_FREQ_HZ       2700u             /* 蜂鸣器 PWM 频率 */
 #define COUNTDOWN_BEEP_MS    120u              /* 读秒每步"哔"的时长 */

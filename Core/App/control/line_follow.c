@@ -132,7 +132,8 @@ static int32_t  s_igc_last_od  = -100000; /* 上一次计数的里程（限最�
 static uint16_t s_igc_hold     = 0u;      /* 咬住一侧的剩余拍数 */
 static uint8_t  s_igc_side     = 1u;      /* 咬哪侧：1 = 左，0 = 右 */
 static uint8_t  s_igc_just     = 0u;      /* 刚进入咬边（对齐 last_e）*/
-static uint8_t  s_igc_cf       = 0u;      /* 连续满足"亮 ≥ IGC_LIT_MIN"的拍数（IGC_CONFIRM_FR 用）*/
+static uint8_t  s_igc_hits     = 0u;      /* 1 = 已经有过"第一次触发"，在等 100ms 内的第二次 */
+static uint8_t  s_igc_hit_age  = 0u;      /* 距第一次触发过了多少拍（拍数 > 10 就作废）*/
 static uint8_t  s_igc_flash_fr = 0u;      /* 闪灯剩余拍数（10ms 一拍；由控制拍递减）*/
 #endif
 
@@ -867,45 +868,54 @@ void line_follow_control(int16_t base)
       telemetry_msg(igb2);
     }
 
-    /* ② 计数（一片白的上升沿，带迟滞 + 最小间距） */
+    /* ② 计数 —— ★2026-10-22 他的新判据：
+         "100ms 内连续两次触发（红外 >5）就 IG++"；
+         IG=1 ⇒ 左转（切点1）、IG=2 ⇒ 右转（切点2）、IG=3 ⇒ 左转（切点3），之后交给出口代码。
+       做法：一片白（亮 ≥ IGC_LIT_MIN，=6 即"大于 5"）的**上升沿**算"一次触发"；
+             第一次只记账，若在 IGC_CONFIRM_MS(100ms) 内再出现一次上升沿 ⇒ 才真正 IG++。
+       迟滞：亮 ≤ IGC_LIT_CLEAR 才算"退出一片白"，允许下一次上升沿。 */
     if (s_igc_on != 0u)
     {
-      if (s_igc_wide == 0u)
+      uint8_t det = (uint8_t)((igc_lit >= (uint8_t)IGC_LIT_MIN) ? 1u : 0u);
+      uint8_t win = (uint8_t)(((uint32_t)IGC_CONFIRM_MS + 9u) / 10u);   /* 100ms = 10 拍 */
+
+      /* 第一次触发的"保质期"到了就作废 */
+      if (s_igc_hits != 0u)
       {
-        if (igc_lit >= (uint8_t)IGC_LIT_MIN)
+        if (s_igc_hit_age > win) { s_igc_hits = 0u; }
+        else                     { s_igc_hit_age++; }
+      }
+
+      if ((s_igc_wide == 0u) && (det != 0u))          /* ← 一次"触发"（上升沿） */
+      {
+        s_igc_wide = 1u;
+        if (s_igc_hits != 0u)                         /* 100ms 内的第二次 ⇒ 正式 IG++ */
         {
-          /* ★"才"的严格性：必须连续 IGC_CONFIRM_FR 拍都满足，单拍毛刺不算 */
-          if (s_igc_cf < 250u) { s_igc_cf++; }
-          if ((s_igc_cf >= (uint8_t)IGC_CONFIRM_FR) &&
-              ((igc_od - s_igc_last_od) >= (int32_t)IGC_MIN_MM))
+          char igb[40];
+          s_igc_hits = 0u;
+          if ((igc_od - s_igc_last_od) >= (int32_t)IGC_MIN_MM)
           {
-            char igb[40];
-            s_igc_wide = 1u;
-            s_igc_cf   = 0u;
             if (s_igc_cnt < 200u) { s_igc_cnt++; }
             s_igc_last_od  = igc_od;
             s_igc_flash_fr = (uint8_t)(((uint32_t)IGC_FLASH_MS + 9u) / 10u);
-
-            if ((s_igc_cnt == 3u) || (s_igc_cnt == 5u) || (s_igc_cnt == 7u))
-            {
-              s_igc_side = (uint8_t)((s_igc_cnt == 5u) ? 0u : 1u);   /* 3=左 / 5=右 / 7=左 */
-              s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + 9u) / 10u);
-              s_igc_just = 1u;
-            }
+            /* ★新映射（他 2026-10-22 改）：1=左、2=右、3=左 */
+            if (s_igc_cnt == 1u)      { s_igc_side = 1u; s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + 9u) / 10u); s_igc_just = 1u; }
+            else if (s_igc_cnt == 2u) { s_igc_side = 0u; s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + 9u) / 10u); s_igc_just = 1u; }
+            else if (s_igc_cnt == 3u) { s_igc_side = 1u; s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + 9u) / 10u); s_igc_just = 1u; }
             (void)snprintf(igb, sizeof(igb), "IG=%u lit=%u OD=%ld\r\n",
                            (unsigned)s_igc_cnt, (unsigned)igc_lit, (long)igc_od);
             telemetry_msg(igb);
           }
         }
-        else
+        else                                          /* 第一次：只记账 */
         {
-          s_igc_cf = 0u;                                   /* 没连续满足 ⇒ 重新数 */
+          s_igc_hits    = 1u;
+          s_igc_hit_age = 0u;
         }
       }
-      else if (igc_lit <= (uint8_t)IGC_LIT_CLEAR)
+      else if ((s_igc_wide != 0u) && (det == 0u) && (igc_lit <= (uint8_t)IGC_LIT_CLEAR))
       {
-        s_igc_wide = 0u;                                     /* 退出"一片白" ⇒ 允许下一次计数 */
-        s_igc_cf   = 0u;
+        s_igc_wide = 0u;                              /* 回到普通线 ⇒ 允许下一次触发 */
       }
     }
   }
@@ -4361,7 +4371,8 @@ void line_follow_gourd_rearm(void)
   s_igc_wide     = 0u;
   s_igc_hold     = 0u;
   s_igc_just     = 0u;
-  s_igc_cf       = 0u;
+  s_igc_hits     = 0u;
+  s_igc_hit_age  = 0u;
   s_igc_last_od  = -100000;
   s_igc_flash_fr = 0u;
 #endif
