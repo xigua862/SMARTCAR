@@ -132,6 +132,7 @@ static int32_t  s_igc_last_od  = -100000; /* 上一次计数的里程（限最�
 static uint16_t s_igc_hold     = 0u;      /* 咬住一侧的剩余拍数 */
 static uint8_t  s_igc_side     = 1u;      /* 咬哪侧：1 = 左，0 = 右 */
 static uint8_t  s_igc_just     = 0u;      /* 刚进入咬边（对齐 last_e）*/
+static uint8_t  s_igc_cf       = 0u;      /* 连续满足"亮 ≥ IGC_LIT_MIN"的拍数（IGC_CONFIRM_FR 用）*/
 static uint8_t  s_igc_flash_fr = 0u;      /* 闪灯剩余拍数（10ms 一拍；由控制拍递减）*/
 #endif
 
@@ -871,29 +872,40 @@ void line_follow_control(int16_t base)
     {
       if (s_igc_wide == 0u)
       {
-        if ((igc_lit >= (uint8_t)IGC_LIT_MIN) &&
-            ((igc_od - s_igc_last_od) >= (int32_t)IGC_MIN_MM))
+        if (igc_lit >= (uint8_t)IGC_LIT_MIN)
         {
-          char igb[40];
-          s_igc_wide = 1u;
-          if (s_igc_cnt < 200u) { s_igc_cnt++; }
-          s_igc_last_od  = igc_od;
-          s_igc_flash_fr = (uint8_t)(((uint32_t)IGC_FLASH_MS + 9u) / 10u);
-
-          if ((s_igc_cnt == 3u) || (s_igc_cnt == 5u) || (s_igc_cnt == 7u))
+          /* ★"才"的严格性：必须连续 IGC_CONFIRM_FR 拍都满足，单拍毛刺不算 */
+          if (s_igc_cf < 250u) { s_igc_cf++; }
+          if ((s_igc_cf >= (uint8_t)IGC_CONFIRM_FR) &&
+              ((igc_od - s_igc_last_od) >= (int32_t)IGC_MIN_MM))
           {
-            s_igc_side = (uint8_t)((s_igc_cnt == 5u) ? 0u : 1u);   /* 3=左 / 5=右 / 7=左 */
-            s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + 9u) / 10u);
-            s_igc_just = 1u;
+            char igb[40];
+            s_igc_wide = 1u;
+            s_igc_cf   = 0u;
+            if (s_igc_cnt < 200u) { s_igc_cnt++; }
+            s_igc_last_od  = igc_od;
+            s_igc_flash_fr = (uint8_t)(((uint32_t)IGC_FLASH_MS + 9u) / 10u);
+
+            if ((s_igc_cnt == 3u) || (s_igc_cnt == 5u) || (s_igc_cnt == 7u))
+            {
+              s_igc_side = (uint8_t)((s_igc_cnt == 5u) ? 0u : 1u);   /* 3=左 / 5=右 / 7=左 */
+              s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + 9u) / 10u);
+              s_igc_just = 1u;
+            }
+            (void)snprintf(igb, sizeof(igb), "IG=%u lit=%u OD=%ld\r\n",
+                           (unsigned)s_igc_cnt, (unsigned)igc_lit, (long)igc_od);
+            telemetry_msg(igb);
           }
-          (void)snprintf(igb, sizeof(igb), "IG=%u lit=%u OD=%ld\r\n",
-                         (unsigned)s_igc_cnt, (unsigned)igc_lit, (long)igc_od);
-          telemetry_msg(igb);
+        }
+        else
+        {
+          s_igc_cf = 0u;                                   /* 没连续满足 ⇒ 重新数 */
         }
       }
       else if (igc_lit <= (uint8_t)IGC_LIT_CLEAR)
       {
         s_igc_wide = 0u;                                     /* 退出"一片白" ⇒ 允许下一次计数 */
+        s_igc_cf   = 0u;
       }
     }
   }
@@ -4349,6 +4361,7 @@ void line_follow_gourd_rearm(void)
   s_igc_wide     = 0u;
   s_igc_hold     = 0u;
   s_igc_just     = 0u;
+  s_igc_cf       = 0u;
   s_igc_last_od  = -100000;
   s_igc_flash_fr = 0u;
 #endif
