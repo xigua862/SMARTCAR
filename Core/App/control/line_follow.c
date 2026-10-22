@@ -849,7 +849,7 @@ void line_follow_control(int16_t base)
       s_igc_wide    = 0u;
       s_igc_hold    = 0u;
       s_igc_last_od = igc_od;
-      s_igc_flash_fr = (uint8_t)(((uint32_t)IGC_FLASH_MS + 9u) / 10u);
+      /* ★他："算了你也不用给进圈提醒了，反正进圈会减速" ⇒ 进圈**不闪灯**，只打一行串口 */
       telemetry_msg("IGC enter (gourd entry flash)");
     }
 
