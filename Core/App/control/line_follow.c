@@ -132,7 +132,8 @@ static int32_t  s_igc_last_od  = -100000; /* 上一次计数的里程（限最�
 static uint16_t s_igc_hold     = 0u;      /* 咬住一侧的剩余拍数 */
 static uint8_t  s_igc_side     = 1u;      /* 咬哪侧：1 = 左，0 = 右 */
 static uint8_t  s_igc_just     = 0u;      /* 刚进入咬边（对齐 last_e）*/
-static uint8_t  s_igc_hits     = 0u;      /* 1 = 已经有过"第一次触发"，在等 100ms 内的第二次 */
+static uint8_t  s_igc_dbg_fr   = 0u;      /* TRG 诊断打印的限流计数 */
+static uint8_t  s_igc_hits     = 0u;      /* 1 = 已经有过"第一次触发"，在等窗口内的第二次 */
 static uint8_t  s_igc_hit_age  = 0u;      /* 距第一次触发过了多少拍（拍数 > 10 就作废）*/
 static uint8_t  s_igc_flash_fr = 0u;      /* 闪灯剩余拍数（10ms 一拍；由控制拍递减）*/
 #endif
@@ -888,6 +889,15 @@ void line_follow_control(int16_t base)
 
       if ((s_igc_wide == 0u) && (det != 0u))          /* ← 一次"触发"（上升沿） */
       {
+        /* ★2026-10-22 晚【诊断】他："还是没办法触发" ⇒ 每次原始触发都打一行 TRG，
+           用来区分"根本没有一片白"vs"有一片白但两次配不上"。限流 50ms，避免阈值抖动刷屏。 */
+        if ((s_igc_dbg_fr == 0u) || ((s_igc_dbg_fr % 5u) == 0u))
+        {
+          char trg[40];
+          (void)snprintf(trg, sizeof(trg), "TRG lit=%u OD=%ld\r\n", (unsigned)igc_lit, (long)igc_od);
+          telemetry_msg(trg);
+        }
+        if (s_igc_dbg_fr < 200u) { s_igc_dbg_fr++; }
         s_igc_wide = 1u;
         if (s_igc_hits != 0u)                         /* 100ms 内的第二次 ⇒ 正式 IG++ */
         {
@@ -4368,6 +4378,7 @@ void line_follow_gourd_rearm(void)
   /* ★2026-10-22：图案计数的"每趟一次性"状态（R162 的教训：漏清 = 一次上电只做一次）*/
   s_igc_on       = 0u;
   s_igc_cnt      = 0u;
+  s_igc_dbg_fr   = 0u;
   s_igc_wide     = 0u;
   s_igc_hold     = 0u;
   s_igc_just     = 0u;
