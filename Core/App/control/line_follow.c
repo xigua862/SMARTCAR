@@ -829,6 +829,15 @@ void line_follow_control(int16_t base)
   line_reading_t r = line_read();
   int8_t e = r.error;
 
+#if GOURD_EDGE_W_EN
+  /* ★2026-10-22 晚【葫芦圈内：最左一路权重 −7 → −14】—— 他："只靠 PD 循迹不行"。
+     只在里程闸门打开后生效；只补"最左那一路"这一项，其他 7 路权重完全不动。 */
+  if ((s_gourd_armed != 0u) && ((r.raw & 0x01u) != 0u))
+  {
+    e = (int8_t)((int16_t)e + ((int16_t)GOURD_EDGE_L_W - (int16_t)EDGE_L_WEIGHT));
+  }
+#endif
+
 #if IGC_EN
   /* ★★★ 2026-10-22 晚【图案计数方案（他说的 IG）】—— 进圈 + 计数 + 咬边调度 ★★★
      他的原话见 app_config.h 的 IGC_* 块。这里只做三件事：
