@@ -618,6 +618,14 @@ static uint8_t s_gsp_dir_mask = 0u;    /* ★R152：本拍哪些"方向窗口"�
 static uint8_t s_c3_prev = 0u;         /* 上一拍切点3 方向窗口是否开着（做下降沿）*/
 static uint8_t s_c3_kick = 0u;         /* 强制转向剩余拍数（>0 = 正在转）*/
 #endif
+#if BLIND_EN
+/* ★2026-10-21 晚【三个切点：窗口内按角度盲走】的状态 —— 方案/参数见 app_config.h 的 BLIND_* 块 */
+static uint8_t  s_bl_idx  = 0xFFu;     /* 正在盲走的切点号 0/1/2；0xFF = 不在盲走 */
+static uint8_t  s_bl_prev = 0u;        /* 上一拍的切点窗口掩码（做上升沿）*/
+static float    s_bl_yaw  = 0.0f;      /* 盲走期间累计航向（deg，正 = 左转）*/
+static uint16_t s_bl_tmr  = 0u;        /* 剩余拍数（超时兜底）*/
+static const float k_bl_deg[3] = { (float)CUT1_DEG, (float)CUT2_DEG, (float)CUT3_DEG };
+#endif
 #if (GSP_TURN_MASK != 0)
 static uint8_t s_gspt_left = 0u;       /* ★R151：硬转剩余拍数（>0 = 正在硬转）*/
 static uint8_t s_gspt_prev = 0u;       /* ★R151：上一拍的信标命中（做上升沿判定）*/
@@ -794,6 +802,80 @@ void line_follow_control(int16_t base)
   line_reading_t r = line_read();
   int8_t e = r.error;
 
+#if BLIND_EN
+  /* ★★★ 2026-10-21 晚【三个切点：窗口内按角度盲走】★★★
+     他的原话："三个切点的通过方式改成在窗口内给个角度盲走，结束后恢复循迹，三个切点分别左/右/左"。
+     · 角度用**陀螺积分**闭环（`imu_get_gyro_z()`，正=左转），不用时间、不用里程 ⇒ **不随电压漂**（今天破案的核心）。
+     · 每拍：yaw += GZ×0.01（控制周期 10ms）；误差 = 目标角 − yaw；差速 d = KP×误差（限幅）；
+             左转 ⇒ 右轮 = 基速 + d / 左轮 = 基速 − d（与出口右转同一套"左快右慢=右转"约定反过来）。
+     · 退出三选一（先到先算）：①角度到位 ②该切点窗口关了 ③超时；退出时清 last_e / D 滤波 / 丢线计数。
+     · 盲走期间不看线 ⇒ 丢线找线 / 十字宽图案 / 接管 / 单向阀 / PD 全部绕过。
+     · 位置：出口右转块之后（出口仍有最高优先级）。★回退：`BLIND_EN` 改 0。 */
+  if (s_bl_idx != 0xFFu)
+  {
+    float   tgt = k_bl_deg[s_bl_idx];
+    float   err;
+    int16_t d;
+    int16_t bl_pwm, br_pwm;
+    uint8_t inwin;
+
+    s_bl_yaw += ((float)imu_get_gyro_z()) * 0.01f;      /* 10ms 一拍：积分航向（正=左）*/
+    err = tgt - s_bl_yaw;                               /* 还要转多少度 */
+
+    d = (int16_t)(BLIND_KP * err);
+    if (d >  (int16_t)BLIND_DIFF_MAX) { d =  (int16_t)BLIND_DIFF_MAX; }
+    if (d < -(int16_t)BLIND_DIFF_MAX) { d = -(int16_t)BLIND_DIFF_MAX; }
+
+    if (d >= 0)                                          /* 左转：右轮快、左轮慢 */
+    {
+      bl_pwm = (int16_t)((int16_t)BLIND_BASE_PWM - d);
+      br_pwm = (int16_t)((int16_t)BLIND_BASE_PWM + d);
+    }
+    else                                                 /* 右转：左轮快、右轮慢 */
+    {
+      bl_pwm = (int16_t)((int16_t)BLIND_BASE_PWM - d);
+      br_pwm = (int16_t)((int16_t)BLIND_BASE_PWM + d);
+    }
+    if (bl_pwm >  99) { bl_pwm =  99; } if (bl_pwm < -99) { bl_pwm = -99; }
+    if (br_pwm >  99) { br_pwm =  99; } if (br_pwm < -99) { br_pwm = -99; }
+    motor_set_differential(bl_pwm, br_pwm);
+    last_error  = (int8_t)((err >= 0.0f) ? -3 : 3);      /* 给丢线兜底一个"刚转过"的方向锚 */
+    lost_cycles = 0;
+    line_lost   = 0;
+
+    inwin = (uint8_t)(s_gsp_dir_mask & (uint8_t)(1u << s_bl_idx));
+    if (s_bl_tmr > 0u) { s_bl_tmr--; }
+
+    if ((err <= (float)BLIND_TOL_DEG) && (err >= -(float)BLIND_TOL_DEG))
+    {
+      s_bl_idx = 0xFFu;
+      telemetry_msg("BLIND exit (angle ok)");
+    }
+    else if (inwin == 0u)
+    {
+      s_bl_idx = 0xFFu;
+      telemetry_msg("BLIND exit (window end)");
+    }
+    else if (s_bl_tmr == 0u)
+    {
+      s_bl_idx = 0xFFu;
+      telemetry_msg("BLIND exit (timeout)");
+    }
+
+    if (s_bl_idx == 0xFFu)
+    {
+      /* 干净交回：清 D 项记忆和丢线计数（不清的话恒定的盲走差速会让 d_term 踢一脚）*/
+      last_e = 0;
+#if USE_D_FILTER
+      lpf_init(&d_lpf, D_FILTER_ALPHA);
+#endif
+      lost_cycles = 0;
+      line_lost   = 0;
+    }
+    return;
+  }
+#endif
+
 #if CUT3_KICK_EN
   /* ★★★ 2026-10-21 晚【切点3 窗口末尾：强制左转】★★★
      他的原话："直接给切点3的最后强制给个左转"。
@@ -953,6 +1035,32 @@ void line_follow_control(int16_t base)
         telemetry_msg("CUT3-KICK set (window end -> force turn)");
       }
       s_c3_prev = c3;
+    }
+#endif
+#if BLIND_EN
+    /* ★★★ 2026-10-21 晚【三个切点：窗口上升沿 ⇒ 进入"按角度盲走"】★★★
+       他的原话："三个切点的通过方式改成在窗口内给个角度盲走，结束后恢复循迹，三个切点分别左/右/左"。
+       判据 = 某个切点的**方向窗口上升沿**（上一拍没开、这一拍开）⇒ 记下是哪个切点，清积分、起超时。
+       ★在这里检测（每拍算掩码处）⇒ 窗口怎么挪（含串口 K 平移）都自动跟着。 */
+    {
+      uint8_t bnow = (uint8_t)(s_gsp_dir_mask & 0x07u);
+      uint8_t bup  = (uint8_t)(bnow & (uint8_t)(~s_bl_prev));
+      if ((bup != 0u) && (s_bl_idx == 0xFFu))
+      {
+        uint8_t bi;
+        for (bi = 0u; bi < 3u; bi++)
+        {
+          if ((bup & (uint8_t)(1u << bi)) != 0u)
+          {
+            s_bl_idx = bi;
+            s_bl_yaw = 0.0f;
+            s_bl_tmr = (uint16_t)(((uint32_t)BLIND_MAX_MS + 9u) / 10u);
+            telemetry_msg("BLIND enter (angle-blind window)");
+            break;
+          }
+        }
+      }
+      s_bl_prev = bnow;
     }
 #endif
   }
@@ -4221,6 +4329,13 @@ void line_follow_gourd_rearm(void)
   /* ★2026-10-21：切点3 强制转向的"每趟一次性"状态必须一起清（这是 R162 那个教训：漏清 = 一次上电只做一次）*/
   s_c3_prev = 0u;
   s_c3_kick = 0u;
+#endif
+#if BLIND_EN
+  /* ★2026-10-21：按角度盲走的"每趟一次性"状态（同上：漏清 = 第二趟起就错）*/
+  s_bl_idx  = 0xFFu;
+  s_bl_prev = 0u;
+  s_bl_yaw  = 0.0f;
+  s_bl_tmr  = 0u;
 #endif
 #if (GSP_TURN_MASK != 0)
   s_gspt_left = 0u;      /* ★R151：硬转状态同进同出 */
