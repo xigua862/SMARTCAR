@@ -3082,14 +3082,20 @@ void line_follow_control(int16_t base)
   }
 #endif
 #if GOURD_EDGE_W_EN
-  /* ★★★ 2026-10-22 晚（他的规则）："只要**左半边**亮了就左转，然后左转触发之后 **150ms 不允许右转**"
-     · 放在**误差链最末、PD 之前** ⇒ 前面（宽图案置0 / 接管 / 单向阀 / G7 / 高通）都算完了，这里说话算数。
-     · 左半边 = 左 4 路（bit0~bit3）任意一路亮 ⇒ e = GOURD_EDGE_L_E（负 = 左打），并把"禁右转"计时器充满。
-     · 计时器还在（之后 GOURD_EDGE_L_MS 毫秒内）⇒ 把往右的修正清零（e>0 ⇒ 0）⇒ 不会被立刻拉回去右转。
+  /* ★★★ 2026-10-22 晚（他的规则）：
+     "只要**左半边**亮了就左转，然后左转触发之后 **150ms 不允许右转**"；
+     后来他又补一句"左边太大了怪不得一直走歪" ⇒ **左半边要亮够 GOURD_EDGE_L_MIN 路**才算触发。
+     · 位置：误差链最末、PD 之前（前面 宽图案置0/接管/单向阀/G7/高通 都算完了，这里说话算数）。
+     · 命中 ⇒ e = GOURD_EDGE_L_E（负 = 左打），并充满"禁右转"计时器；
+     · 命中之后的 GOURD_EDGE_L_MS 毫秒内 ⇒ e > 0 一律清零（不许往右修，不会被立刻拉回去）。
      ★只在葫芦圈内（s_gourd_armed）生效。回退：GOURD_EDGE_W_EN 改 0。 */
   if (s_gourd_armed != 0u)
   {
-    if ((r.raw & 0x000Fu) != 0u)                     /* 左半边有灯 */
+    uint8_t lft = 0u;
+    uint8_t bi2;
+    for (bi2 = 0u; bi2 < 4u; bi2++) { if (((r.raw >> bi2) & 1u) != 0u) { lft++; } }
+
+    if (lft >= (uint8_t)GOURD_EDGE_L_MIN)
     {
       e = (int8_t)GOURD_EDGE_L_E;
       s_edge_noright = (uint16_t)(((uint32_t)GOURD_EDGE_L_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS);
@@ -3097,7 +3103,7 @@ void line_follow_control(int16_t base)
     else if (s_edge_noright > 0u)
     {
       s_edge_noright--;
-      if (e > 0) { e = 0; }                          /* 禁右转：把往右的修正清零 */
+      if (e > 0) { e = 0; }
     }
   }
 #endif
