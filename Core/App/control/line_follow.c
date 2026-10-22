@@ -829,14 +829,6 @@ void line_follow_control(int16_t base)
   line_reading_t r = line_read();
   int8_t e = r.error;
 
-#if GOURD_EDGE_W_EN
-  /* ★2026-10-22 晚【葫芦圈内：最左一路权重 −7 → −14】—— 他："只靠 PD 循迹不行"。
-     只在里程闸门打开后生效；只补"最左那一路"这一项，其他 7 路权重完全不动。 */
-  if ((s_gourd_armed != 0u) && ((r.raw & 0x01u) != 0u))
-  {
-    e = (int8_t)((int16_t)e + ((int16_t)GOURD_EDGE_L_W - (int16_t)EDGE_L_WEIGHT));
-  }
-#endif
 
 #if IGC_EN
   /* ★★★ 2026-10-22 晚【图案计数方案（他说的 IG）】—— 进圈 + 计数 + 咬边调度 ★★★
@@ -3083,6 +3075,17 @@ void line_follow_control(int16_t base)
       if (en < -40) { en = -40; }
       e = (int8_t)en;
     }
+  }
+#endif
+#if GOURD_EDGE_W_EN
+  /* ★★★ 2026-10-22 晚【圈内：最左一路一触发 ⇒ 直接 e = −20 左转】—— 他："要不让他直接检测到左边的那个被触发就直接左转"
+     为什么放这里：**误差链最末、PD 之前**。前面那些（宽图案置 0、接管、单向阀、G7、高通）都已经算完 ⇒ 这里说话算数。
+     （之前把权重补偿加在最前面，结果被"宽图案 ⇒ e=0"吃掉，所以他觉得"权重没用"——就是位置问题。）
+     条件：里程闸门打开（进圈后）+ 最左一路（bit0）亮。
+     ★回退：`GOURD_EDGE_W_EN` 改 0。 */
+  if ((s_gourd_armed != 0u) && ((r.raw & 0x01u) != 0u))
+  {
+    e = (int8_t)GOURD_EDGE_L_E;
   }
 #endif
   int16_t d_term = (int16_t)(e - last_e);
