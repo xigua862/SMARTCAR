@@ -853,6 +853,19 @@ void line_follow_control(int16_t base)
       telemetry_msg("IGC enter (gourd entry flash)");
     }
 
+    /* ①' ★他："IG 仅仅在葫芦弯道内生效" ⇒ 出圈就停（否则长直线/分支口的宽图案会继续把 IG 数上去）。
+       判据：OD ≥ 出口门槛 + IGC_EXIT_MARGIN_MM。清掉"在圈里"状态 ⇒ 之后一律不计数。 */
+    if ((s_igc_on != 0u) &&
+        (igc_od >= ((int32_t)GOURD_EXIT_FROM_MM + (int32_t)IGC_EXIT_MARGIN_MM)))
+    {
+      char igb2[40];
+      s_igc_on   = 0u;
+      s_igc_wide = 0u;
+      s_igc_hold = 0u;
+      (void)snprintf(igb2, sizeof(igb2), "IGC leave (last IG=%u)\r\n", (unsigned)s_igc_cnt);
+      telemetry_msg(igb2);
+    }
+
     /* ② 计数（一片白的上升沿，带迟滞 + 最小间距） */
     if (s_igc_on != 0u)
     {
