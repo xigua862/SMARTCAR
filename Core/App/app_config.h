@@ -1452,7 +1452,7 @@
    · `ERR_HPF_ALPHA`：0.5~0.85，越大 = 高通越"宽"（衰减越慢）。
    ★车开始"抖/画龙" ⇒ `ERR_HPF_PCT` 改 0 或 15；觉得不敏感 ⇒ 50。 */
 #define USE_ERR_HPF          1
-#define ERR_HPF_PCT          30
+#define ERR_HPF_PCT          0
 #define ERR_HPF_ALPHA        0.70f
 #define USE_CORR_SLEW        0   /* ★实测无效，已关（见注释）*/
 #define CORR_SLEW_STEP       4     /* 每拍允许的差速变化上限（PWM 单位）*/
@@ -1890,8 +1890,8 @@
                                          · 现在：36/24 一直吃到 13094 ⇒ 与 50% 减速无缝交接，速度单调下降，不再"先冲一下"。
                                          · 窗口长度 11276→13094 = 1818mm（原来 1668）。
                                          ★回退：改回 12944。出窗口（mm）★他实测出口点后替换；必须 > FROM */
-#define GOURD_SPD_STRAIGHT   28       /* 窗口内"直道档"（= 交付版静态 SPEED_STRAIGHT）*/
-#define GOURD_SPD_CURVE      20       /* 窗口内"弯道档"（= 交付版静态 SPEED_CURVE，严格 24）*/
+#define GOURD_SPD_STRAIGHT   24       /* 窗口内"直道档"（= 交付版静态 SPEED_STRAIGHT）*/
+#define GOURD_SPD_CURVE      18       /* 窗口内"弯道档"（= 交付版静态 SPEED_CURVE，严格 24）*/
 #define GOURD_SPD_FORCE_IG   1        /* ★1016-R131（他定的方案）：窗口内【用里程把 IG 挂上】——
                                          他原话："我们的里程计应该替代 IG，但不是重写逻辑，应该在里程
                                          ≥11176 的时候就让 IG 挂上，然后出圈让 IG 正常（照着之前的逻辑）挂 0"。
@@ -2218,7 +2218,7 @@
 #define BRANCH_EDGE_AUTO     0        /* 0 = 关掉老代码的"图案自动接管"（IGC 方案自己决定何时咬边）*/
 #define IGC_EN               1
 #define IGC_ENTRY_MM         11176    /* 进圈里程（比原来的锚 11276 往前推 100）—— 也用作"全程降速"的起点 */
-#define IGC_LIT_MIN          4        /* ★2026-10-22 他："改成 5 个红外传感器被触发才 IG+1"
+#define IGC_LIT_MIN          5        /* ★2026-10-22 他："改成 5 个红外传感器被触发才 IG+1"
                                           ⇒ 亮路数 **≥5** 才算一次"图案触发"（数值本来就是 5，等同"大于 4"）；
                                              想更严 ⇒ 改 6。*/
 #define IGC_CONFIRM_MS       3000      /* ★2026-10-22 他的新判据："100ms 内连续两次触发（亮>5）才 IG++"

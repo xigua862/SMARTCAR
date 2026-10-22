@@ -136,9 +136,6 @@ static int32_t  s_igc_last_od  = -100000; /* 上一次计数的里程（限最�
 static uint16_t s_igc_hold     = 0u;      /* 咬住一侧的剩余拍数 */
 static uint8_t  s_igc_side     = 1u;      /* 咬哪侧：1 = 左，0 = 右 */
 static uint8_t  s_igc_just     = 0u;      /* 刚进入咬边（对齐 last_e）*/
-static uint8_t  s_igc_dbg_fr   = 0u;      /* TRG 诊断打印的限流计数 */
-static uint8_t  s_igc_hits     = 0u;      /* 1 = 已经有过"第一次触发"，在等窗口内的第二次 */
-static uint16_t s_igc_hit_age  = 0u;      /* 距第一次触发过了多少拍（5ms 一拍；超过窗口就作废）*/
 static uint8_t  s_igc_flash_fr = 0u;      /* 闪灯剩余拍数（10ms 一拍；由控制拍递减）*/
 #endif
 
@@ -881,55 +878,40 @@ void line_follow_control(int16_t base)
        迟滞：亮 ≤ IGC_LIT_CLEAR 才算"退出一片白"，允许下一次上升沿。 */
     if (s_igc_on != 0u)
     {
+      /* ★★★ 2026-10-22 晚（新方案"慢速咬边"）—— 他的原话：
+         "进入葫芦弯道后…到第一个切点的时候会有左边大半都被触发的情况，我想着要是速度慢点能够响应这个点
+          那么我们就用同一个套路过这三个切点，最后出口处的转弯也是超级慢速度来读到然后出去"
+         ⇒ **不看里程窗口、不数次数**：只要出现"一片白"（亮 ≥ IGC_LIT_MIN），就按**哪一半亮得多**决定咬哪边：
+            左半边亮的更多 ⇒ 咬左；右半边更多 ⇒ 咬右。
+            同一条规则天然给出 左/右/左（因为三个切点的宽图案偏侧不同）。
+         迟滞：亮 ≤ IGC_LIT_CLEAR 才算退出一片白，之后才允许下一次咬边；
+               两次咬边之间至少 IGC_MIN_MM 里程（防同一片白连续触发）。 */
       uint8_t det = (uint8_t)((igc_lit >= (uint8_t)IGC_LIT_MIN) ? 1u : 0u);
-      uint16_t win = (uint16_t)(((uint32_t)IGC_CONFIRM_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS);   /* 100ms = 10 拍 */
 
-      /* 第一次触发的"保质期"到了就作废 */
-      if (s_igc_hits != 0u)
+      if ((s_igc_wide == 0u) && (det != 0u))
       {
-        if (s_igc_hit_age > win) { s_igc_hits = 0u; }
-        else                     { s_igc_hit_age++; }
-      }
-
-      if ((s_igc_wide == 0u) && (det != 0u))          /* ← 一次"触发"（上升沿） */
-      {
-        /* ★2026-10-22 晚【诊断】他："还是没办法触发" ⇒ 每次原始触发都打一行 TRG，
-           用来区分"根本没有一片白"vs"有一片白但两次配不上"。限流 50ms，避免阈值抖动刷屏。 */
-        if ((s_igc_dbg_fr == 0u) || ((s_igc_dbg_fr % (uint8_t)(50u / (uint32_t)CTRL_PERIOD_MS)) == 0u))
-        {
-          char trg[40];
-          (void)snprintf(trg, sizeof(trg), "TRG lit=%u OD=%ld\r\n", (unsigned)igc_lit, (long)igc_od);
-          telemetry_msg(trg);
-        }
-        if (s_igc_dbg_fr < 200u) { s_igc_dbg_fr++; }
+        char gw[44];
+        uint8_t lh = 0u, rh = 0u, bi;
+        for (bi = 0u; bi < 4u; bi++) { if (((r.raw >> bi) & 1u) != 0u) { lh++; } }        /* 左半 4 路 */
+        for (bi = 4u; bi < 8u; bi++) { if (((r.raw >> bi) & 1u) != 0u) { rh++; } }        /* 右半 4 路 */
         s_igc_wide = 1u;
-        if (s_igc_hits != 0u)                         /* 100ms 内的第二次 ⇒ 正式 IG++ */
+        if ((igc_od - s_igc_last_od) >= (int32_t)IGC_MIN_MM)
         {
-          char igb[40];
-          s_igc_hits = 0u;
-          if ((igc_od - s_igc_last_od) >= (int32_t)IGC_MIN_MM)
-          {
-            if (s_igc_cnt < 200u) { s_igc_cnt++; }
-            s_igc_last_od  = igc_od;
-            s_igc_flash_fr = (uint8_t)(((uint32_t)IGC_FLASH_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS);
-            /* ★新映射（他 2026-10-22 改）：1=左、2=右、3=左 */
-            if (s_igc_cnt == 1u)      { s_igc_side = 1u; s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS); s_igc_just = 1u; }
-            else if (s_igc_cnt == 2u) { s_igc_side = 0u; s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS); s_igc_just = 1u; }
-            else if (s_igc_cnt == 3u) { s_igc_side = 1u; s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS); s_igc_just = 1u; }
-            (void)snprintf(igb, sizeof(igb), "IG=%u lit=%u OD=%ld\r\n",
-                           (unsigned)s_igc_cnt, (unsigned)igc_lit, (long)igc_od);
-            telemetry_msg(igb);
-          }
-        }
-        else                                          /* 第一次：只记账 */
-        {
-          s_igc_hits    = 1u;
-          s_igc_hit_age = 0u;
+          s_igc_last_od  = igc_od;
+          s_igc_side     = (uint8_t)((lh >= rh) ? 1u : 0u);   /* 左多 ⇒ 咬左；否则咬右 */
+          s_igc_hold     = (uint16_t)(((uint32_t)IGC_HOLD_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS);
+          s_igc_just     = 1u;
+          s_igc_flash_fr = (uint8_t)(((uint32_t)IGC_FLASH_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS);
+          if (s_igc_cnt < 200u) { s_igc_cnt++; }
+          (void)snprintf(gw, sizeof(gw), "GW=%u %s L%u R%u OD=%ld\r\n",
+                         (unsigned)s_igc_cnt, (s_igc_side != 0u) ? "LEFT" : "RIGHT",
+                         (unsigned)lh, (unsigned)rh, (long)igc_od);
+          telemetry_msg(gw);
         }
       }
-      else if ((s_igc_wide != 0u) && (det == 0u) && (igc_lit <= (uint8_t)IGC_LIT_CLEAR))
+      else if ((s_igc_wide != 0u) && (igc_lit <= (uint8_t)IGC_LIT_CLEAR))
       {
-        s_igc_wide = 0u;                              /* 回到普通线 ⇒ 允许下一次触发 */
+        s_igc_wide = 0u;
       }
     }
   }
@@ -4406,7 +4388,6 @@ void line_follow_gourd_rearm(void)
   /* ★2026-10-22：图案计数的"每趟一次性"状态（R162 的教训：漏清 = 一次上电只做一次）*/
   s_igc_on       = 0u;
   s_igc_cnt      = 0u;
-  s_igc_dbg_fr   = 0u;
 #if USE_ERR_HPF
   s_hpf_y = 0.0f;      /* 每趟起步清高通状态（否则上一趟残余会踢一下）*/
   s_hpf_e = 0.0f;
@@ -4414,8 +4395,6 @@ void line_follow_gourd_rearm(void)
   s_igc_wide     = 0u;
   s_igc_hold     = 0u;
   s_igc_just     = 0u;
-  s_igc_hits     = 0u;
-  s_igc_hit_age  = 0u;
   s_igc_last_od  = -100000;
   s_igc_flash_fr = 0u;
 #endif
