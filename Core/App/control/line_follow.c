@@ -825,6 +825,13 @@ void line_follow_control(int16_t base)
     d = (int16_t)(BLIND_KP * err);
     if (d >  (int16_t)BLIND_DIFF_MAX) { d =  (int16_t)BLIND_DIFF_MAX; }
     if (d < -(int16_t)BLIND_DIFF_MAX) { d = -(int16_t)BLIND_DIFF_MAX; }
+    /* ★2026-10-22【治"原地转"】: 差速再压一道 —— 内侧轮必须保持**正转**（≥ BLIND_MIN_PWM）。
+       他上一版的反馈："你这纯纯原地转啊，我要的是微微斜" ⇒ 因为 BASE 22 + 差速 45 会让内轮反转，
+       两轮反向 = 原地打转。现在上限 = BASE − MIN（默认 26 − 12 = 14）⇒ 只能是"小半径弧线"。 */
+    if (d >  (int16_t)((int16_t)BLIND_BASE_PWM - (int16_t)BLIND_MIN_PWM))
+    { d = (int16_t)((int16_t)BLIND_BASE_PWM - (int16_t)BLIND_MIN_PWM); }
+    if (d < -(int16_t)((int16_t)BLIND_BASE_PWM - (int16_t)BLIND_MIN_PWM))
+    { d = -(int16_t)((int16_t)BLIND_BASE_PWM - (int16_t)BLIND_MIN_PWM); }
 
     if (d >= 0)                                          /* 左转：右轮快、左轮慢 */
     {
