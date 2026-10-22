@@ -121,6 +121,37 @@ static uint16_t s_be_events = 0;   /* 触发次数（日志用）*/
 static uint8_t  s_be_conf   = 0;   /* ★R8：连续满足触发判据的拍数（防单拍毛刺）*/
 static int32_t  s_be_od     = 0;   /* ★R8：上一次触发时的里程（防成簇误报）*/
 #endif
+
+#if IGC_EN
+/* ★★★ 2026-10-22 晚【图案计数方案（他说的 IG）】状态 —— 方案见 app_config.h 的 IGC_* 块 ★★★
+   一句话：进圈后每遇到一次"亮 ≥ IGC_LIT_MIN 的一片白"就计一次，第 3/5/7 次分别咬左/右/左。 */
+static uint8_t  s_igc_on       = 0u;      /* 1 = 本趟已进入葫芦（越过 IGC_ENTRY_MM）*/
+static uint8_t  s_igc_cnt      = 0u;      /* 图案计数（= 他说的 IG）*/
+static uint8_t  s_igc_wide     = 0u;      /* 上一拍是否处于"一片白"（做上升沿 + 迟滞）*/
+static int32_t  s_igc_last_od  = -100000; /* 上一次计数的里程（限最小间距）*/
+static uint16_t s_igc_hold     = 0u;      /* 咬住一侧的剩余拍数 */
+static uint8_t  s_igc_side     = 1u;      /* 咬哪侧：1 = 左，0 = 右 */
+static uint8_t  s_igc_just     = 0u;      /* 刚进入咬边（对齐 last_e）*/
+static uint8_t  s_igc_flash_fr = 0u;      /* 闪灯剩余拍数（10ms 一拍；由控制拍递减）*/
+#endif
+
+uint8_t line_follow_igc_count(void)
+{
+#if IGC_EN
+  return s_igc_cnt;
+#else
+  return 0u;
+#endif
+}
+
+uint8_t line_follow_igc_flash(void)
+{
+#if IGC_EN
+  return (uint8_t)((s_igc_flash_fr > 0u) ? 1u : 0u);
+#else
+  return 0u;
+#endif
+}
 #if GOURD_ARC_FLIP
 static int32_t  s_arc_mdeg  = 0;   /* ★同号偏航累计（毫度）—— 绕圈/相切点检测 */
 static uint8_t  s_arc_push  = 0;   /* ★反向打舵剩余拍数 */
@@ -794,6 +825,67 @@ void line_follow_control(int16_t base)
   line_reading_t r = line_read();
   int8_t e = r.error;
 
+#if IGC_EN
+  /* ★★★ 2026-10-22 晚【图案计数方案（他说的 IG）】—— 进圈 + 计数 + 咬边调度 ★★★
+     他的原话见 app_config.h 的 IGC_* 块。这里只做三件事：
+       ① 里程越过 IGC_ENTRY_MM ⇒ 本趟进圈、计数清零、三灯闪一下；
+       ② 每遇到一次"亮 ≥ IGC_LIT_MIN 的一片白"的上升沿（且距上次 ≥ IGC_MIN_MM）⇒ 计数 +1、闪一下、打一行串口；
+          回到"亮 ≤ IGC_LIT_CLEAR" 才允许再计数（迟滞）；
+       ③ 计数到 3/5/7 ⇒ 让"咬边"状态机启动（下面误差链里生效），3=左、5=右、7=左。
+     ★计数与"咬边动作"分开：计数照常累加（他要看 IG 到几），动作只在 3/5/7 发生。 */
+  {
+    int32_t igc_od  = odom_distance_mm() - s_odom_shift;   /* 用固件标定的里程（不吃 K 平移）*/
+    uint8_t igc_lit = 0u;
+    uint8_t igc_i;
+    for (igc_i = 0u; igc_i < 8u; igc_i++) { if (((r.raw >> igc_i) & 1u) != 0u) { igc_lit++; } }
+
+    if (s_igc_flash_fr > 0u) { s_igc_flash_fr--; }         /* 闪灯计时（每拍减一）*/
+
+    /* ① 进圈 */
+    if ((s_igc_on == 0u) && (igc_od >= (int32_t)IGC_ENTRY_MM))
+    {
+      s_igc_on      = 1u;
+      s_igc_cnt     = 0u;
+      s_igc_wide    = 0u;
+      s_igc_hold    = 0u;
+      s_igc_last_od = igc_od;
+      s_igc_flash_fr = (uint8_t)(((uint32_t)IGC_FLASH_MS + 9u) / 10u);
+      telemetry_msg("IGC enter (gourd entry flash)");
+    }
+
+    /* ② 计数（一片白的上升沿，带迟滞 + 最小间距） */
+    if (s_igc_on != 0u)
+    {
+      if (s_igc_wide == 0u)
+      {
+        if ((igc_lit >= (uint8_t)IGC_LIT_MIN) &&
+            ((igc_od - s_igc_last_od) >= (int32_t)IGC_MIN_MM))
+        {
+          char igb[40];
+          s_igc_wide = 1u;
+          if (s_igc_cnt < 200u) { s_igc_cnt++; }
+          s_igc_last_od  = igc_od;
+          s_igc_flash_fr = (uint8_t)(((uint32_t)IGC_FLASH_MS + 9u) / 10u);
+
+          if ((s_igc_cnt == 3u) || (s_igc_cnt == 5u) || (s_igc_cnt == 7u))
+          {
+            s_igc_side = (uint8_t)((s_igc_cnt == 5u) ? 0u : 1u);   /* 3=左 / 5=右 / 7=左 */
+            s_igc_hold = (uint16_t)(((uint32_t)IGC_HOLD_MS + 9u) / 10u);
+            s_igc_just = 1u;
+          }
+          (void)snprintf(igb, sizeof(igb), "IG=%u lit=%u OD=%ld\r\n",
+                         (unsigned)s_igc_cnt, (unsigned)igc_lit, (long)igc_od);
+          telemetry_msg(igb);
+        }
+      }
+      else if (igc_lit <= (uint8_t)IGC_LIT_CLEAR)
+      {
+        s_igc_wide = 0u;                                     /* 退出"一片白" ⇒ 允许下一次计数 */
+      }
+    }
+  }
+#endif
+
 #if CUT3_KICK_EN
   /* ★★★ 2026-10-21 晚【切点3 窗口末尾：强制左转】★★★
      他的原话："直接给切点3的最后强制给个左转"。
@@ -1412,7 +1504,8 @@ void line_follow_control(int16_t base)
          ② 与上次触发至少隔 BRANCH_EDGE_MIN_MM 里程（防成簇误报）。
          ★为什么这两道是必须的：本功能的"左右交替"是计数式的、没有反馈 ——
            多触发一次或少触发一次，后面所有相切点的分支都会反过来。 */
-      if ((s_be_conf >= (uint8_t)BRANCH_EDGE_CONFIRM) &&
+      if ((BRANCH_EDGE_AUTO != 0) &&
+          (s_be_conf >= (uint8_t)BRANCH_EDGE_CONFIRM) &&
           ((odom_distance_mm() - s_be_od) >= (int32_t)BRANCH_EDGE_MIN_MM))
       {
         char _m[96];
@@ -2837,6 +2930,20 @@ void line_follow_control(int16_t base)
 #if USE_D_FILTER
   e = (int8_t)lpf_update(&d_lpf, (float)e);   /* 对误差低通, 压 D 项高频噪声 */
 #endif
+#if IGC_EN
+  /* ★2026-10-22 晚【IGC：咬住一侧】—— 放在老接管之前 ⇒ 它说了算；老自动接管已被 BRANCH_EDGE_AUTO 关掉。
+     做法与老接管完全一样：误差只取"该侧最靠外的 N 路"。*/
+  if (s_igc_hold > 0u)
+  {
+    int16_t ies = line_error_side(r.raw, (uint8_t)BRANCH_EDGE_N,
+                                  (uint8_t)(s_igc_side ? 0u : 1u));
+    if (ies >  (int16_t)BRANCH_EDGE_ERR_MAX) { ies =  (int16_t)BRANCH_EDGE_ERR_MAX; }
+    if (ies < -(int16_t)BRANCH_EDGE_ERR_MAX) { ies = -(int16_t)BRANCH_EDGE_ERR_MAX; }
+    e = (int8_t)(((int16_t)BRANCH_EDGE_SIGN) * ies);
+    if (s_igc_just != 0u) { s_igc_just = 0u; last_e = e; }
+    s_igc_hold--;
+  }
+#endif
 #if USE_BRANCH_EDGE
   /* ★2026-10-08【分支口：误差只取"该侧最靠外的 N 路"】
      位置：低通之后、D 项之前 = 它是本拍误差的最终来源。
@@ -4221,6 +4328,16 @@ void line_follow_gourd_rearm(void)
   /* ★2026-10-21：切点3 强制转向的"每趟一次性"状态必须一起清（这是 R162 那个教训：漏清 = 一次上电只做一次）*/
   s_c3_prev = 0u;
   s_c3_kick = 0u;
+#endif
+#if IGC_EN
+  /* ★2026-10-22：图案计数的"每趟一次性"状态（R162 的教训：漏清 = 一次上电只做一次）*/
+  s_igc_on       = 0u;
+  s_igc_cnt      = 0u;
+  s_igc_wide     = 0u;
+  s_igc_hold     = 0u;
+  s_igc_just     = 0u;
+  s_igc_last_od  = -100000;
+  s_igc_flash_fr = 0u;
 #endif
 #if (GSP_TURN_MASK != 0)
   s_gspt_left = 0u;      /* ★R151：硬转状态同进同出 */

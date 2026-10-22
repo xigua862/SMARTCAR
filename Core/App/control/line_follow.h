@@ -157,4 +157,11 @@ int32_t line_follow_odom_shift_apply(int32_t delta);
 void    line_follow_odom_shift_reset(void);
 uint8_t line_follow_odom_win_dump(int32_t *out, uint8_t n);
 
+/* ★★★ 2026-10-22 晚【图案计数方案（他说的 IG）】★★★
+   `line_follow_igc_count()`：本趟葫芦里的图案计数（进圈清零，每遇一次"亮 ≥5 的一片白" +1）；
+   `line_follow_igc_flash()`：1 = 正在闪灯（进圈 / 每次计数都会闪一下，时长 IGC_FLASH_MS）。
+   LED 侧（car_fsm.c）用它来打三灯闪。 */
+uint8_t line_follow_igc_count(void);
+uint8_t line_follow_igc_flash(void);
+
 #endif /* LINE_FOLLOW_H */

@@ -374,6 +374,21 @@ void car_fsm_run(uint32_t dt_ms)
       }
 #endif
 
+#if IGC_EN
+      /* ★★★ 2026-10-22 晚【图案计数（他说的 IG）⇒ 三灯闪一下】★★★
+         进圈、以及每计数一次，都会请求一次短闪（`IGC_FLASH_MS`，由 line_follow 里按 10ms 拍计时）。
+         优先级放在"出口闪 / 三灯闪"之后、常亮之前 —— 出口是路线上最该看见的事件，不能被它盖住。
+         回退：`IGC_EN` 改 0。 */
+      if (must_wr == 0u)
+      {
+        if (line_follow_igc_flash() != 0u)
+        {
+          leds    = 0x07u;
+          must_wr = 1u;
+        }
+      }
+#endif
+
 #if (GSP_STEADY_MASK != 0)
       /* ★★ 2026-10-21 晚【切点窗口 ⇒ 三灯常亮】—— 他："现在第三个切点给个常亮LED，我看看"
          为什么要单独一条：跑车时 LED3 本来就被 FSM 常亮着（运行中指示）⇒ `GSP_LED_MASK` 给切点3 点亮 LED3
