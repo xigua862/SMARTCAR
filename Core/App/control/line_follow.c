@@ -91,7 +91,11 @@ uint8_t line_follow_odom_win_dump(int32_t *out, uint8_t n)
 static float    s_hpf_y = 0.0f;    /* 高通滤波器的状态（输出）*/
 static float    s_hpf_e = 0.0f;    /* 上一拍的误差（高通输入）*/
 #endif
-static int8_t   last_error  = 0;static int8_t   last_e      = 0;   /* 上一次误差(PD 微分用) */
+#if GOURD_EDGE_W_EN
+static uint16_t s_edge_noright = 0u;   /* 左半边触发后"禁止右转"的剩余拍数 */
+#endif
+static int8_t   last_error  = 0;
+static int8_t   last_e      = 0;   /* 上一次误差(PD 微分用) */
 static uint16_t lost_cycles = 0;   /* ★uint8 会在 256 拍回绕, 把"停车防跑飞"抵消 */
 static uint8_t  line_lost   = 0;
 /* ★★★ 2026-09-26 晚【找回线后的"缓一拍"计数】★★★
@@ -3078,14 +3082,23 @@ void line_follow_control(int16_t base)
   }
 #endif
 #if GOURD_EDGE_W_EN
-  /* ★★★ 2026-10-22 晚【圈内：最左一路一触发 ⇒ 直接 e = −20 左转】—— 他："要不让他直接检测到左边的那个被触发就直接左转"
-     为什么放这里：**误差链最末、PD 之前**。前面那些（宽图案置 0、接管、单向阀、G7、高通）都已经算完 ⇒ 这里说话算数。
-     （之前把权重补偿加在最前面，结果被"宽图案 ⇒ e=0"吃掉，所以他觉得"权重没用"——就是位置问题。）
-     条件：里程闸门打开（进圈后）+ 最左一路（bit0）亮。
-     ★回退：`GOURD_EDGE_W_EN` 改 0。 */
-  if ((s_gourd_armed != 0u) && ((r.raw & 0x01u) != 0u))
+  /* ★★★ 2026-10-22 晚（他的规则）："只要**左半边**亮了就左转，然后左转触发之后 **150ms 不允许右转**"
+     · 放在**误差链最末、PD 之前** ⇒ 前面（宽图案置0 / 接管 / 单向阀 / G7 / 高通）都算完了，这里说话算数。
+     · 左半边 = 左 4 路（bit0~bit3）任意一路亮 ⇒ e = GOURD_EDGE_L_E（负 = 左打），并把"禁右转"计时器充满。
+     · 计时器还在（之后 GOURD_EDGE_L_MS 毫秒内）⇒ 把往右的修正清零（e>0 ⇒ 0）⇒ 不会被立刻拉回去右转。
+     ★只在葫芦圈内（s_gourd_armed）生效。回退：GOURD_EDGE_W_EN 改 0。 */
+  if (s_gourd_armed != 0u)
   {
-    e = (int8_t)GOURD_EDGE_L_E;
+    if ((r.raw & 0x000Fu) != 0u)                     /* 左半边有灯 */
+    {
+      e = (int8_t)GOURD_EDGE_L_E;
+      s_edge_noright = (uint16_t)(((uint32_t)GOURD_EDGE_L_MS + (uint32_t)(CTRL_PERIOD_MS - 1u)) / (uint32_t)CTRL_PERIOD_MS);
+    }
+    else if (s_edge_noright > 0u)
+    {
+      s_edge_noright--;
+      if (e > 0) { e = 0; }                          /* 禁右转：把往右的修正清零 */
+    }
   }
 #endif
   int16_t d_term = (int16_t)(e - last_e);
@@ -4399,6 +4412,9 @@ void line_follow_gourd_rearm(void)
 #if IGC_EN
   /* ★2026-10-22：图案计数的"每趟一次性"状态（R162 的教训：漏清 = 一次上电只做一次）*/
   s_igc_on       = 0u;
+#if GOURD_EDGE_W_EN
+  s_edge_noright = 0u;   /* 禁右转计时器每趟清零 */
+#endif
   s_igc_cnt      = 0u;
 #if USE_ERR_HPF
   s_hpf_y = 0.0f;      /* 每趟起步清高通状态（否则上一趟残余会踢一下）*/
